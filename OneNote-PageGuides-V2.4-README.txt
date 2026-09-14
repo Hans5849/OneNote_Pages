@@ -1,0 +1,249 @@
+ONENOTE PAGE GUIDES 2.4
+======================
+
+WHAT THIS IS
+------------
+A standalone Windows PowerShell utility for desktop OneNote. It inserts PNG
+background images with TOP, BOTTOM, LEFT, and RIGHT boundaries. No Onetastic,
+paid add-in, scheduled task, service, or administrator installation is needed.
+
+These are visual guides, NOT native OneNote print breaks. They do not reflow
+text, set printer margins, or automatically grow as you type. The requested
+number of frames is inserted; Refresh replaces that set. Remove guides before
+printing or PDF export because the images can print and affect page extent.
+
+V2.4 STATUS
+-----------
+This file was statically reviewed in the build environment. Source assertions
+and an exact XPath fixture check were run; see the companion Validation.json.
+A PowerShell runtime was not available in that environment. The actual
+PowerShell parser, embedded SelfTest, Windows COM calls, graphics rendering,
+installation, recovery, and print alignment were NOT executed there.
+
+Run SelfTest on your PC first. A passing SelfTest exercises local helpers and
+mock read/update methods, NOT the real OneNote integration. Use a disposable
+OneNote page for the first actual Add/Refresh/Remove cycle.
+
+QUICK START FOR YOUR SCRIPTS FOLDER
+----------------------------------
+Save OneNote-PageGuides-V2.4.ps1 in:
+    C:\Users\hans5\OneDrive\Desktop\Scripts
+
+Open normal Windows PowerShell 5.1, NOT an administrator window. Run:
+
+    cd "$HOME\OneDrive\Desktop\Scripts"
+    Set-ExecutionPolicy -Scope Process Bypass
+    Unblock-File ".\OneNote-PageGuides-V2.4.1.ps1"
+    .\OneNote-PageGuides-V2.4.1.ps1 -Action SelfTest
+
+SelfTest loads System.Drawing and tests the actual local PowerShell parser,
+geometry, PNG transparency and all four edges, XML construction, recovery
+payloads, selectors, and mocked pinned-page read/update verification. It does
+not connect to OneNote or write files. Do not continue if it reports a failure.
+
+After SelfTest passes, install:
+
+    .\OneNote-PageGuides-V2.4.1.ps1 -Action Install -ShortcutPages 10 -CreateDesktopShortcuts
+
+The script requests confirmation before installation and notebook changes.
+Verify the target shown and answer Y when appropriate.
+
+Installation replaces the existing utility at the SAME compatible path:
+    %LOCALAPPDATA%\OneNotePageGuides\OneNote-PageGuides-V2.ps1
+
+The filename deliberately remains V2.ps1. The banner says version 2.4.
+The old installed file is copied to OneNote-PageGuides-V2.ps1.previous.
+
+Start Menu shortcuts: Refresh, Remove, Status, Self-Test.
+Optional Desktop shortcuts: Refresh and Remove. Windows' redirected Desktop
+path is used, including a Desktop managed by OneDrive.
+Shortcuts launch Windows PowerShell with -STA and a per-process policy flag.
+They keep the console open so errors remain visible. Close it after use.
+No persistent system/user execution policy is changed by this utility.
+
+FIRST ONENOTE TEST
+------------------
+Open desktop OneNote and make a disposable page. Then:
+
+    $guides = "$env:LOCALAPPDATA\OneNotePageGuides\OneNote-PageGuides-V2.ps1"
+    & $guides -Action Status -Verbose
+
+Choose the disposable page in the picker. Status does not modify notebooks.
+The script intentionally does NOT use Application.Windows or window titles.
+It lists notebook pages through GetHierarchy and pins your selection once.
+
+Dry run (builds and validates guides and reads any old guide backup data, but
+makes no guide changes and creates no recovery files):
+
+    & $guides -Action Refresh -Pages 2 -WhatIf
+
+Choose the test page. If the dry run completes, perform the actual test:
+
+    & $guides -Action Refresh -Pages 2
+
+Select that same disposable page, verify the confirmation target, and answer Y.
+Check all four bounds and that ordinary typing can appear over the images.
+Do not type, drag guide images, or edit the page while a write is in progress.
+
+Then remove the test guides:
+
+    & $guides -Action Remove
+
+Select the test page again. Confirm that the frames disappear and your ordinary
+notes remain. Each command invocation selects once; Refresh never selects again
+mid-operation.
+
+NORMAL USE
+----------
+    & $guides -Action Refresh -Pages 10
+    & $guides -Action Status
+    & $guides -Action Remove
+
+Running the script without -Action performs Status, NOT Refresh.
+Add refuses to add another set when recognized V2 guides already exist.
+Use Refresh to replace the existing set. Remove does not delete V1 text outlines.
+V2.0 through V2.3 image guides with the original metadata are recognized.
+
+PAGE PICKER
+-----------
+The graphical picker supports filtering and shows Notebook, Section, PageName,
+LastModified, and PageId. Currently viewed notebook is only a sorting hint;
+no target is inferred from a window title or the latest edit time.
+Canceling the graphical picker stops without opening a second picker.
+
+Deleted/recycle-bin pages and known locked/read-only branches are excluded.
+OneNote can still reject pages for other permissions/access reasons.
+
+Use -ConsolePicker when the graphical picker is unavailable. The console lists
+20 results at a time and supports N, P, F (filter), and Q (cancel). All matching
+pages are reachable, not just the first 30.
+
+Optional ways to narrow or bypass selection:
+    & $guides -Action Status -PageFilter 'ENEE 620'
+    & $guides -Action Status -ConsolePicker
+
+-PageId accepts an exact ID printed by Status. It is checked against the live,
+unlocked hierarchy; it does not bypass deleted-page filtering. Quote the full
+ID, including its braces. Duplicate page titles are not automatically resolved.
+
+GEOMETRY AND PRINT CALIBRATION
+-----------------------------
+Paper mode (default):
+    Letter portrait: 612 x 792 points (8.5 x 11 inches).
+    Solid outer frame includes all four physical-paper edges.
+    Dashed inner frame indicates the specified margins.
+    Initial margins: left/right 1 inch; top/bottom 0.5 inch.
+    These are initial guide settings, NOT readings of your printer settings.
+
+Examples:
+    & $guides -Action Refresh -Pages 10 -MarginLeft .5 -MarginRight .5
+    & $guides -Action Refresh -Orientation Landscape -Pages 10
+    & $guides -Action Refresh -StartX 36 -StartY 72 -Pages 10
+    & $guides -Action Refresh -HideMargins -Pages 10
+
+StartX and StartY are canvas points; 72 points = 1 inch.
+PagePitchPoints is the interval from the top of one frame to the next.
+Zero means automatic: paper height in Paper mode, usable height in PrintArea.
+Paper-mode frames retain physical paper dimensions. A custom Paper pitch must
+be at least the physical paper height to avoid overlapping whole-sheet frames.
+
+PrintArea mode:
+    Draws a content-area frame instead of physical paper and margin bands.
+    Default Letter geometry is 468 x 720 points with the default margins.
+    Frame width = paper width minus left/right margins.
+    Frame height = effective page pitch; it can be independently calibrated.
+    StartX/StartY locate the content frame, NOT the outer physical paper edge.
+
+Example only -- 720 is an initial assumption, not a measured exporter setting:
+    & $guides -Action Refresh -GuideMode PrintArea -PagePitchPoints 720 -Pages 10
+
+Use the same print/export settings during calibration. Test with disposable
+content, remove guides before the export, and compare the actual breaks against
+the guide intervals. A constant vertical offset changes StartY; accumulated
+page-to-page drift requires changing pitch. Width/scaling differences may also
+require adjusting guide margins or the source content. Neither mode reads the
+print driver or guarantees correct OneNote pagination. Inserting a Letter-sized
+rectangle by itself does not establish the exporter's true page boundaries.
+
+To save chosen geometry in the Refresh shortcuts, repeat Install with the
+geometry switches and -ShortcutPages:
+    .\OneNote-PageGuides-V2.4.ps1 -Action Install -ShortcutPages 10 -GuideMode PrintArea -PagePitchPoints 720 -StartX 36 -StartY 72 -CreateDesktopShortcuts
+
+SAFETY CHANGES
+--------------
+* Status is the default; mutations require a named action and confirmation.
+* -WhatIf runs preflight but does not commit guide/file changes.
+* A selected page ID is pinned for the entire operation.
+* Page selection never relies on an unreadable Windows.Count property.
+* New PNG/XML is prepared before any old guide is removed.
+* Refresh inserts a uniquely tagged replacement batch, verifies its metadata,
+  object IDs, dimensions, positions and background status, THEN removes old guides.
+* Deletions target only tagged, top-level V2 guide image objects, not outlines,
+  regular images, or matching text in other objects.
+* A recovery journal includes old image bytes, not just callback-only basic XML.
+* Old guides are rechecked before deletion, including image-byte hashes.
+* Nonzero page timestamps and force=false are passed to OneNote writes.
+* A per-page mutex prevents overlapping utility writes in the same Windows session.
+* Post-write checks report failure rather than assuming success.
+* Uninstall preserves guide recovery journals and previous script copies.
+
+These measures do not turn multiple COM operations into an atomic transaction.
+A crash, sync/permission problem, or OneNote normalization may leave a partial
+result. No unqualified guarantee of notebook safety or export alignment is made.
+
+RECOVERY AFTER A FAILED OR INTERRUPTED CHANGE
+--------------------------------------------
+Before writing, V2.4 saves a transaction JSON in:
+    %LOCALAPPDATA%\OneNotePageGuides\Backups
+
+It contains guide PNGs/XML plus notebook/page names, IDs, and transaction state.
+It is NOT a complete notebook backup. Keep it private; it is stored locally and
+is not encrypted by this script. There is no automatic upload or cleanup.
+
+If a change fails, STOP rather than repeatedly running Refresh. The console
+prints the exact recovery filename and command. For example:
+
+    $recovery = Read-Host 'Paste the full recovery JSON path from the failed operation'
+    & $guides -Action Recover -RecoveryFile $recovery
+
+Recover uses the journal's original page ID and requests confirmation. It
+restores missing old guides without overwriting existing objects; then it
+removes identifiable images from that transaction's new batch. Restoration
+uses separate metadata tokens to avoid inserting the same missing guide twice.
+It is intended for the matching failed operation, not for replaying old journals
+after unrelated changes or later successful guide replacements.
+
+If a current guide differs from the saved geometry/metadata, recovery may stop
+rather than delete an edited object. If OneNote discarded the guide metadata,
+new untagged images CANNOT be identified safely by this utility. They are left
+alone: inspect and remove those guide images manually on the disposable page.
+Always inspect the page after recovery. Ordinary notes/ink are not restored by
+this command, and it is not a substitute for normal OneNote backups.
+
+UNINSTALL
+---------
+First Remove guides from every relevant page. Then:
+    & $guides -Action Uninstall
+
+Uninstall removes the installed script and its known shortcuts, but preserves
+Backups and .previous copies. It does not walk notebooks or remove their guides.
+
+TROUBLESHOOTING
+---------------
+Run commands in a visible Windows PowerShell console with -Verbose. Errors keep
+the original exception and include a verbose script stack where available.
+SelfTest is useful before COM troubleshooting because it does not require OneNote.
+A successful local test is not a successful live write test.
+
+Do not run OneNote and the utility as different users/elevation levels. If policy
+is centrally managed, the process policy flag may not override that policy; do
+not change machine-wide policy just to run this utility.
+
+REFERENCES USED FOR THE IMPLEMENTATION
+--------------------------------------
+Microsoft OneNote desktop Application interface:
+https://learn.microsoft.com/en-us/office/client-developer/onenote/application-interface-onenote
+OneNote enumerations:
+https://learn.microsoft.com/en-us/office/client-developer/onenote/enumerations-onenote-developer-reference
+OneNote 2013 XML schema reference maintained in OneMore:
+https://raw.githubusercontent.com/stevencohn/OneMore/main/Reference/0336.OneNoteApplication_2013.xsd

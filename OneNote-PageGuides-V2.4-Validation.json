@@ -1,0 +1,130 @@
+{
+  "file": "OneNote-PageGuides-V2.4.ps1",
+  "sha256": "a56e9d5c71071e7196368061dc8aa2786cb4e03bf7ad5380486ec9ba46dddf16",
+  "lines": 1172,
+  "scope": "Static source assertions and exact XPath fixture check; no PowerShell execution.",
+  "checks": [
+    {
+      "check": "Block comment terminates",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "Here-string terminates in column one",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "Balanced code delimiters with strings/comments masked",
+      "result": "PASS",
+      "detail": "A lexical check, not a PowerShell parse."
+    },
+    {
+      "check": "No C-style quote escaping",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "UTF-8 BOM",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "CRLF line endings",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "Read-only default",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "ShouldProcess supported",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "No window lookup",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "No Get-CurrentOneNotePage during refresh",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "Binary guide backup API present",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "No force or unguarded timestamp writes",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "Stage then verify then remove in entry point",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "Preflight before write gate",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "Journal before writes",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "Per-page mutual exclusion",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "Readback verification after deletion",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "Local self-test branch before OneNote connection",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "Uninstall preserves backups",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "No downloads/network/installable add-ins",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "Exact guide selector excludes ordinary and nested images",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "Portrait/landscape margin geometry",
+      "result": "PASS",
+      "detail": ""
+    },
+    {
+      "check": "Unique top-level function names",
+      "result": "PASS",
+      "detail": ""
+    }
+  ],
+  "not_run": [
+    "PowerShell parser (no PowerShell runtime available in build environment)",
+    "Built-in SelfTest, including mock methods and System.Drawing PNG rendering",
+    "Windows PowerShell 5.1 COM integration, live add/refresh/remove/recover",
+    "Actual OneNote PDF/print calibration"
+  ],
+  "local_self_test_command": ".\\OneNote-PageGuides-V2.4.ps1 -Action SelfTest"
+}
