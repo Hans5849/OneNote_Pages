@@ -20,6 +20,9 @@ $required = @(
     'function Import-UserSettings',
     'function Save-UserSettings',
     "`$script:SettingsPath",
+    "Write-Host 'Margin examples:'",
+    "Write-Host '  Default: left/right 1 inch; top/bottom 0.5 inch.'",
+    "Write-Host '  Narrow: 0.5 inch on every side.'",
     "`$OneNote.UpdatePageContent(`$Payload.OuterXml,`$stamp,2,`$false)"
 )
 foreach ($text in $required) {
