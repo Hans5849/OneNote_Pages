@@ -1,0 +1,8 @@
+# Local validation and editor output
+*.log
+*.tmp
+.vscode/
+.idea/
+
+# PowerShell test output
+TestResults/

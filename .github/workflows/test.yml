@@ -1,0 +1,20 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  powershell-5:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static checks
+        shell: powershell
+        run: .\tests\static-check.ps1
+      - name: Built-in self-test
+        shell: powershell
+        run: .\OneNote-PageGuides.ps1 -Action SelfTest
