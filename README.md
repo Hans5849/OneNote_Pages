@@ -64,8 +64,10 @@ $guides = "$env:LOCALAPPDATA\OneNotePageGuides\OneNote-PageGuides-V2.ps1"
 & $guides -Action Configure
 ```
 
-Enter margins in inches. Press Enter at a prompt to retain its current value.
-The settings are saved locally in
+The interactive prompt shows the built-in default (1 inch left/right and 0.5
+inch top/bottom) and a narrow example (0.5 inch on every side). Enter margins
+in inches, or press Enter at a prompt to retain its current value. The settings
+are saved locally in
 `%LOCALAPPDATA%\OneNotePageGuides\settings.json`; subsequent Add and Refresh
 operations—including the Refresh shortcut—use them automatically.
 

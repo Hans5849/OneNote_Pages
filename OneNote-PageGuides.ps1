@@ -163,6 +163,9 @@ function Configure-Margins {
     $explicit = @('MarginLeft','MarginRight','MarginTop','MarginBottom') |
         Where-Object { $script:InvocationParameters -contains $_ }
     if (@($explicit).Count -eq 0) {
+        Write-Host 'Margin examples:'
+        Write-Host '  Default: left/right 1 inch; top/bottom 0.5 inch.'
+        Write-Host '  Narrow: 0.5 inch on every side.'
         Write-Host 'Press Enter to keep the value shown in brackets.'
         $script:MarginLeft = Read-MarginSetting 'Left margin' $MarginLeft
         $script:MarginRight = Read-MarginSetting 'Right margin' $MarginRight
