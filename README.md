@@ -12,8 +12,8 @@ they are **visual aids**, not native print boundaries.
 ## Features
 
 - Adjustable left, right, top, and bottom margins (0–4 inches each)
-- Persistent margin settings with an interactive configuration shortcut
-- Letter portrait and landscape layouts
+- Persistent page-size profile, custom dimensions, page pitch, and margins
+- Calibrated OneNote PDF Letter, exact standard Letter, and custom layouts
 - Physical-paper and calibrated print-area modes
 - Add, refresh, inspect, and remove operations
 - Page picker that pins one explicit page for the whole operation
@@ -26,6 +26,13 @@ they are **visual aids**, not native print boundaries.
 - Windows PowerShell 5.1 (not PowerShell 7)
 - Desktop OneNote exposing the `OneNote.Application` COM API
 - `System.Drawing`, included with supported Windows PowerShell installations
+
+> [!NOTE]
+> Desktop OneNote normally stores the user's custom page-templates notebook at
+> `%APPDATA%\Microsoft\Templates\My Templates.one` (typically
+> `C:\Users\<username>\AppData\Roaming\Microsoft\Templates\My Templates.one`).
+> This is separate from OneNote Page Guides' `settings.json`; the utility does
+> not modify the templates file.
 
 ## Download and verify
 
@@ -49,31 +56,35 @@ Do not continue if the self-test reports a failure.
 
 Installation copies the utility to
 `%LOCALAPPDATA%\OneNotePageGuides\OneNote-PageGuides-V2.ps1`. It creates Start
-Menu shortcuts for Refresh, Remove, Configure Margins, Status, and Self-Test;
+Menu shortcuts for Refresh, Remove, Configure, Status, and Self-Test;
 the optional desktop shortcuts are Refresh and Remove. Existing installations
 at that compatible path are backed up with a `.previous` suffix.
 
-## Adjust margins
+## Configure geometry and margins
 
 ### Interactive, persistent settings
 
-Run the **Configure OneNote Page Guide Margins** Start Menu shortcut, or:
+Run the **Configure OneNote Page Guide Margins** Start Menu shortcut (the
+compatible shortcut name is retained), or:
 
 ```powershell
 $guides = "$env:LOCALAPPDATA\OneNotePageGuides\OneNote-PageGuides-V2.ps1"
 & $guides -Action Configure
 ```
 
-The interactive prompt shows the built-in default (1 inch left/right and 0.5
-inch top/bottom) and a narrow example (0.5 inch on every side). Enter margins
-in inches, or press Enter at a prompt to retain its current value. The settings
-are saved locally in
+The interactive prompt shows the current page profile and permits
+`OneNotePdfLetter`, `Letter`, or `Custom`. Custom geometry is entered in points.
+It also prompts for page pitch; `0` means automatic. Finally, enter margins in
+inches, or press Enter to retain each current value. The settings are saved in
 `%LOCALAPPDATA%\OneNotePageGuides\settings.json`; subsequent Add and Refresh
 operations—including the Refresh shortcut—use them automatically.
 
-For scripting, save all four values without interactive prompts by supplying at
-least one margin argument. Omitted values retain their saved value (or the
-built-in default):
+The settings schema is version 2. Existing version-1 files containing only
+margins are accepted without deletion: their margins are retained and missing
+geometry values use the new `OneNotePdfLetter` and automatic-pitch defaults.
+
+For scripting, supplying any configurable argument skips interactive prompts.
+Omitted values retain their saved value (or built-in default):
 
 ```powershell
 & $guides -Action Configure `
@@ -81,7 +92,23 @@ built-in default):
     -MarginTop 0.5 -MarginBottom 0.5
 ```
 
-Reset to the built-in defaults (left/right 1 inch, top/bottom 0.5 inch):
+```powershell
+# Use calibrated OneNote PDF geometry permanently
+& $guides -Action Configure -PageSizeProfile OneNotePdfLetter
+
+# Use exact physical Letter geometry permanently
+& $guides -Action Configure -PageSizeProfile Letter
+
+# Example custom calibration
+& $guides -Action Configure `
+    -PageSizeProfile Custom `
+    -PageWidthPoints 611.4 `
+    -PageHeightPoints 792.84 `
+    -PagePitchPoints 792.84
+```
+
+Reset all saved geometry and margins to `OneNotePdfLetter`, automatic pitch,
+and left/right 1 inch plus top/bottom 0.5 inch:
 
 ```powershell
 & $guides -Action Configure -ResetSettings
@@ -89,7 +116,8 @@ Reset to the built-in defaults (left/right 1 inch, top/bottom 0.5 inch):
 
 ### One-time overrides
 
-Explicit values override saved margins only for that command:
+Explicit values override saved settings only for that command and do not alter
+`settings.json` unless the action is Configure:
 
 ```powershell
 & $guides -Action Refresh -Pages 5 `
@@ -126,8 +154,22 @@ needed.
 
 ## Geometry and calibration
 
-Letter Paper mode draws a 612 × 792 point portrait sheet (792 × 612 landscape),
-with a solid outer frame and dashed margin rectangle. One inch is 72 points.
+The default `OneNotePdfLetter` profile is **611.40 × 792.84 points** in portrait
+(792.84 × 611.40 landscape). These calibrated values come from measured desktop
+OneNote PDF exports. They do not redefine physical US Letter paper. The
+`Letter` profile remains exactly **612 × 792 points** in portrait (792 × 612
+landscape). Paper mode draws the effective sheet with a solid outer frame and
+dashed margin rectangle. One inch is 72 points.
+
+The geometry parameters are `PageSizeProfile`, `PageWidthPoints`,
+`PageHeightPoints`, and `PagePitchPoints`. Width and height are required for a
+`Custom` profile and describe portrait geometry; landscape swaps them after
+profile resolution. Profile dimensions normally supply width and height for the
+two built-in profiles.
+
+With fresh-install defaults, portrait frames begin at Y positions 0.00,
+792.84, 1585.68, 2378.52, 3171.36, and 3964.20 points for a six-page guide set
+starting at zero.
 
 ```powershell
 & $guides -Action Refresh -Orientation Landscape -Pages 10
@@ -135,7 +177,9 @@ with a solid outer frame and dashed margin rectangle. One inch is 72 points.
 ```
 
 PrintArea mode draws only the calculated content frame. `PagePitchPoints`
-allows independent vertical calibration:
+allows independent vertical calibration. A value of `0` automatically uses the
+effective frame height, so an explicit `792.84` is normally unnecessary with
+the portrait `OneNotePdfLetter` profile:
 
 ```powershell
 & $guides -Action Refresh -GuideMode PrintArea -PagePitchPoints 720 -Pages 10
@@ -144,6 +188,11 @@ allows independent vertical calibration:
 Neither mode reads printer settings or guarantees OneNote pagination. Calibrate
 with the same export settings and disposable content. A constant offset calls
 for `StartY`; accumulating drift calls for a pitch adjustment.
+
+Settings use independent precedence: an explicit command-line value overrides
+the corresponding saved value, which overrides the built-in default. Status
+reports the effective profile, orientation, frame dimensions, automatic or
+explicit pitch, and margins for troubleshooting.
 
 ## Recovery
 
