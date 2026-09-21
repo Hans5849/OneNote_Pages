@@ -1,7 +1,7 @@
 ﻿#requires -Version 5.1
 <#
 .SYNOPSIS
-    OneNote Page Guides 2.5.0 - removable visual guides, not native print boundaries.
+    OneNote Page Guides 2.6.0 - removable visual guides, not native print boundaries.
 .DESCRIPTION
     Windows desktop OneNote only. No add-in, subscription, or administrator rights.
     Status is the read-only default. A page is selected ONCE via the notebook
@@ -13,7 +13,7 @@
     A local recovery journal embeds the OLD guide PNG bytes before any write.
     Use Recover after an interrupted/failed change; it does not restore notes.
 
-    Paper mode shows full Letter sheets plus optional margin rectangles.
+    Paper mode shows full calibrated sheets plus optional margin rectangles.
     PrintArea mode shows content-sized frames, not physical paper/margins.
     PagePitchPoints is independent of the paper size. NO interval is guaranteed
     to match OneNote printing. Calibrate against a disposable-page export.
@@ -36,9 +36,9 @@
 .EXAMPLE
     .\OneNote-PageGuides.ps1 -Action Recover -RecoveryFile 'C:\path\transaction.json'
 .NOTES
-    Version: 2.5.0
-    Adds persistent, adjustable margins through the Configure action. Explicit
-    margin parameters always override saved values for the current invocation.
+    Version: 2.6.0
+    Adds persistent page-size profiles, custom geometry, pitch, and margins.
+    Explicit parameters always override saved values for the current invocation.
     Sources: Microsoft OneNote desktop Application interface / Enumerations;
     OneNoteApplication_2013.xsd. No web requests are made by this script.
     Recovery is guide-only and best-effort, not a notebook backup or transaction.
@@ -51,6 +51,9 @@ param(
     [ValidateRange(1,100)][int]$Pages = 10,
     [ValidateSet('Portrait','Landscape')][string]$Orientation = 'Portrait',
     [ValidateSet('Paper','PrintArea')][string]$GuideMode = 'Paper',
+    [ValidateSet('OneNotePdfLetter','Letter','Custom')][string]$PageSizeProfile = 'OneNotePdfLetter',
+    [ValidateRange(10.0,10000.0)][double]$PageWidthPoints = 611.40,
+    [ValidateRange(10.0,10000.0)][double]$PageHeightPoints = 792.84,
     [ValidateRange(0.0,4.0)][double]$MarginLeft = 1.0,
     [ValidateRange(0.0,4.0)][double]$MarginRight = 1.0,
     [ValidateRange(0.0,4.0)][double]$MarginTop = 0.5,
@@ -71,7 +74,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$script:Version = '2.5.0'
+$script:Version = '2.6.0'
 $script:OneNamespace = 'http://schemas.microsoft.com/office/onenote/2013/onenote'
 $script:MetaName = 'OneNotePageGuidesV2'
 $script:RecoveryMetaName = 'OneNotePageGuidesRecovery'
@@ -84,6 +87,8 @@ $script:RunningFile = $PSCommandPath
 $script:JournalPath = ''
 $script:Journal = $null
 $script:InvocationParameters = @($PSBoundParameters.Keys)
+$script:PageWidthAvailable = $script:InvocationParameters -contains 'PageWidthPoints'
+$script:PageHeightAvailable = $script:InvocationParameters -contains 'PageHeightPoints'
 
 function Assert-Windows {
     if ($env:OS -ne 'Windows_NT') {
@@ -109,6 +114,9 @@ function Import-UserSettings {
     if (-not (Test-Path -LiteralPath $script:SettingsPath -PathType Leaf)) { return }
     try {
         $settings = Get-Content -LiteralPath $script:SettingsPath -Raw | ConvertFrom-Json
+        $schema = 1
+        if ($null -ne $settings.PSObject.Properties['schemaVersion']) { $schema = [int]$settings.schemaVersion }
+        if ($schema -lt 1 -or $schema -gt 2) { throw "Unsupported settings schema version $schema." }
         foreach ($name in @('MarginLeft','MarginRight','MarginTop','MarginBottom')) {
             if ($script:InvocationParameters -contains $name) { continue }
             $property = $settings.PSObject.Properties[$name]
@@ -119,6 +127,31 @@ function Import-UserSettings {
             }
             Set-Variable -Name $name -Value $value -Scope Script
         }
+        if ($script:InvocationParameters -notcontains 'PageSizeProfile' -and
+            $null -ne $settings.PSObject.Properties['PageSizeProfile']) {
+            $savedProfile = [string]$settings.PageSizeProfile
+            if ($savedProfile -notin @('OneNotePdfLetter','Letter','Custom')) { throw 'Saved PageSizeProfile is invalid.' }
+            $script:PageSizeProfile = $savedProfile
+        }
+        foreach ($name in @('PageWidthPoints','PageHeightPoints')) {
+            $property = $settings.PSObject.Properties[$name]
+            if ($script:InvocationParameters -notcontains $name -and $null -ne $property) {
+                $value = [double]$property.Value
+                if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -lt 10 -or $value -gt 10000) {
+                    throw "Saved $name must be between 10 and 10000 points."
+                }
+                Set-Variable -Name $name -Value $value -Scope Script
+                Set-Variable -Name ($name.Replace('Points','Available')) -Value $true -Scope Script
+            }
+        }
+        if ($script:InvocationParameters -notcontains 'PagePitchPoints' -and
+            $null -ne $settings.PSObject.Properties['PagePitchPoints']) {
+            $value = [double]$settings.PagePitchPoints
+            if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -lt 0 -or $value -gt 10000) {
+                throw 'Saved PagePitchPoints must be 0 through 10000 points.'
+            }
+            $script:PagePitchPoints = $value
+        }
     }
     catch {
         throw "Settings file '$($script:SettingsPath)' is invalid. Use -Action Configure -ResetSettings to remove it. $($_.Exception.Message)"
@@ -128,7 +161,11 @@ function Import-UserSettings {
 function Save-UserSettings {
     [void][IO.Directory]::CreateDirectory($script:InstallDirectory)
     $settings = [ordered]@{
-        schemaVersion = 1
+        schemaVersion = 2
+        PageSizeProfile = $PageSizeProfile
+        PageWidthPoints = $PageWidthPoints
+        PageHeightPoints = $PageHeightPoints
+        PagePitchPoints = $PagePitchPoints
         MarginLeft = $MarginLeft
         MarginRight = $MarginRight
         MarginTop = $MarginTop
@@ -152,17 +189,46 @@ function Read-MarginSetting {
     return $value
 }
 
-function Configure-Margins {
+function Read-GeometrySetting {
+    param([Parameter(Mandatory)][string]$Name, [double]$Current, [switch]$AllowAutomatic)
+    $range = if ($AllowAutomatic) { '0 (automatic), or 10-10000' } else { '10-10000' }
+    $answer = Read-Host ("{0} in points ({1}) [{2}]" -f $Name,$range,(Format-Point $Current))
+    if ([string]::IsNullOrWhiteSpace($answer)) { return $Current }
+    $value = 0.0
+    $ok = [double]::TryParse($answer,[Globalization.NumberStyles]::Float,
+        [Globalization.CultureInfo]::InvariantCulture,[ref]$value)
+    if (-not $ok -or [double]::IsNaN($value) -or [double]::IsInfinity($value) -or
+        (($value -lt 10 -or $value -gt 10000) -and -not ($AllowAutomatic -and $value -eq 0))) {
+        throw "Invalid $Name '$answer'. Enter $range using a period as the decimal separator."
+    }
+    return $value
+}
+
+function Configure-Settings {
     if ($ResetSettings) {
         if (Test-Path -LiteralPath $script:SettingsPath -PathType Leaf) {
             Remove-Item -LiteralPath $script:SettingsPath -Force -Confirm:$false
         }
-        Write-Host 'Saved margins removed. Defaults are left/right 1 inch and top/bottom 0.5 inch.'
+        Write-Host 'Saved settings removed. Defaults restored: OneNotePdfLetter, automatic pitch, and 1/1/0.5/0.5 inch margins.'
         return
     }
-    $explicit = @('MarginLeft','MarginRight','MarginTop','MarginBottom') |
+    $explicit = @('MarginLeft','MarginRight','MarginTop','MarginBottom','PageSizeProfile',
+        'PageWidthPoints','PageHeightPoints','PagePitchPoints') |
         Where-Object { $script:InvocationParameters -contains $_ }
     if (@($explicit).Count -eq 0) {
+        Write-Host "Current page-size profile: $PageSizeProfile"
+        $answer = Read-Host 'Page profile: OneNotePdfLetter, Letter, or Custom (Enter keeps current)'
+        if (-not [string]::IsNullOrWhiteSpace($answer)) {
+            $match = @('OneNotePdfLetter','Letter','Custom') | Where-Object { $_ -ieq $answer }
+            if (@($match).Count -ne 1) { throw "Invalid page profile '$answer'." }
+            $script:PageSizeProfile = $match[0]
+        }
+        if ($PageSizeProfile -eq 'Custom') {
+            $script:PageWidthPoints = Read-GeometrySetting 'Portrait page width' $PageWidthPoints
+            $script:PageHeightPoints = Read-GeometrySetting 'Portrait page height' $PageHeightPoints
+            $script:PageWidthAvailable = $true; $script:PageHeightAvailable = $true
+        }
+        $script:PagePitchPoints = Read-GeometrySetting 'Page pitch' $PagePitchPoints -AllowAutomatic
         Write-Host 'Margin examples:'
         Write-Host '  Default: left/right 1 inch; top/bottom 0.5 inch.'
         Write-Host '  Narrow: 0.5 inch on every side.'
@@ -172,11 +238,14 @@ function Configure-Margins {
         $script:MarginTop = Read-MarginSetting 'Top margin' $MarginTop
         $script:MarginBottom = Read-MarginSetting 'Bottom margin' $MarginBottom
     }
-    [void](Get-Geometry)
+    $configuredGeometry = Get-Geometry
     Save-UserSettings
+    Write-Host ("Saved geometry: profile {0}; effective {1} x {2} pt; pitch {3}." -f `
+        $PageSizeProfile,(Format-Point $configuredGeometry.PaperWidth),(Format-Point $configuredGeometry.PaperHeight),
+        $(if ($PagePitchPoints -eq 0) { 'automatic' } else { (Format-Point $PagePitchPoints) + ' pt' }))
     Write-Host ("Saved margins (inches): left {0}, right {1}, top {2}, bottom {3}." -f `
         (Format-Point $MarginLeft),(Format-Point $MarginRight),(Format-Point $MarginTop),(Format-Point $MarginBottom))
-    Write-Host 'Refresh and Add now use these values unless margin parameters are supplied explicitly.'
+    Write-Host 'Refresh and Add now use these values unless parameters are supplied explicitly.'
 }
 
 function Format-Point {
@@ -350,7 +419,7 @@ function Select-TargetPage {
         $gridFailed = $false
         $picked = @()
         try {
-            $picked = @($ordered | Out-GridView -Title 'OneNote Page Guides 2.5.0 - choose ONE target page' -OutputMode Single)
+            $picked = @($ordered | Out-GridView -Title 'OneNote Page Guides 2.6.0 - choose ONE target page' -OutputMode Single)
         }
         catch {
             $gridFailed = $true
@@ -476,14 +545,31 @@ function Get-Geometry {
     param([string]$PaperOrientation = $Orientation, [string]$Mode = $GuideMode,
           [double]$Left = $MarginLeft, [double]$Right = $MarginRight,
           [double]$Top = $MarginTop, [double]$Bottom = $MarginBottom,
-          [double]$Pitch = $PagePitchPoints)
-    foreach ($value in @($Left,$Right,$Top,$Bottom,$Pitch)) {
+          [double]$Pitch = $PagePitchPoints,
+          [string]$Profile = $PageSizeProfile,
+          [double]$CustomWidth = $PageWidthPoints,
+          [double]$CustomHeight = $PageHeightPoints,
+          [switch]$CustomDimensionsAvailable)
+    foreach ($value in @($Left,$Right,$Top,$Bottom,$Pitch,$CustomWidth,$CustomHeight)) {
         if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -lt 0) {
             throw 'Geometry must use finite, nonnegative numbers.'
         }
     }
-    $paperW = 612.0; $paperH = 792.0
-    if ($PaperOrientation -eq 'Landscape') { $paperW = 792.0; $paperH = 612.0 }
+    switch ($Profile) {
+        'OneNotePdfLetter' { $portraitW = 611.40; $portraitH = 792.84 }
+        'Letter' { $portraitW = 612.0; $portraitH = 792.0 }
+        'Custom' {
+            $available = $CustomDimensionsAvailable -or ($script:PageWidthAvailable -and $script:PageHeightAvailable)
+            if (-not $available) { throw 'Custom profile requires PageWidthPoints and PageHeightPoints from saved settings or command-line parameters.' }
+            if ($CustomWidth -lt 10 -or $CustomWidth -gt 10000 -or $CustomHeight -lt 10 -or $CustomHeight -gt 10000) {
+                throw 'Custom page width and height must each be 10 to 10000 finite points.'
+            }
+            $portraitW = $CustomWidth; $portraitH = $CustomHeight
+        }
+        default { throw "Unknown page-size profile '$Profile'." }
+    }
+    $paperW = $portraitW; $paperH = $portraitH
+    if ($PaperOrientation -eq 'Landscape') { $paperW = $portraitH; $paperH = $portraitW }
     $contentW = $paperW - 72.0*($Left+$Right)
     $contentH = $paperH - 72.0*($Top+$Bottom)
     if ($contentW -le 0 -or $contentH -le 0) { throw 'Margins leave no usable area.' }
@@ -496,6 +582,7 @@ function Get-Geometry {
     }
     if ($Mode -eq 'PrintArea') { $frameH = $Pitch }
     [pscustomobject]@{
+        Profile=$Profile; Orientation=$PaperOrientation
         PaperWidth=$paperW; PaperHeight=$paperH; FrameWidth=$frameW; FrameHeight=$frameH
         PrintableWidth=$contentW; PrintableHeight=$contentH; Pitch=$Pitch; Mode=$Mode
         Left=72.0*$Left; Right=72.0*$Right; Top=72.0*$Top; Bottom=72.0*$Bottom
@@ -569,7 +656,9 @@ function New-GuidePayload {
         [void](Add-XmlChild $image 'Size' @{
             width=(Format-Point $Geometry.FrameWidth);height=(Format-Point $Geometry.FrameHeight);isSetByUser='true'
         })
-        $marker = 'v2;version=2.5.0;batch={0};page={1};mode={2};pitch={3};' -f $Batch,$p,$Geometry.Mode,(Format-Point $Geometry.Pitch)
+        $marker = 'v2;version={0};batch={1};page={2};mode={3};pitch={4};profile={5};width={6};height={7};' -f `
+            $script:Version,$Batch,$p,$Geometry.Mode,(Format-Point $Geometry.Pitch),$Geometry.Profile,
+            (Format-Point $Geometry.PaperWidth),(Format-Point $Geometry.PaperHeight)
         [void](Add-XmlChild $image 'Meta' @{name=$script:MetaName;content=$marker})
         [void](Add-XmlChild $image 'Data' @{} $Png)
     }
@@ -818,6 +907,13 @@ function Write-TargetSummary {
 function Show-GuideStatus {
     param($Page,$Target)
     Write-TargetSummary $Target
+    $geometry = Get-Geometry
+    $pitchKind = if ($PagePitchPoints -eq 0) { 'automatic' } else { 'explicit' }
+    Write-Host ("Geometry: profile {0}; {1}; frame {2} x {3} pt; pitch {4} pt ({5})." -f `
+        $geometry.Profile,$geometry.Orientation,(Format-Point $geometry.FrameWidth),
+        (Format-Point $geometry.FrameHeight),(Format-Point $geometry.Pitch),$pitchKind)
+    Write-Host ("Margins (inches): left {0}, right {1}, top {2}, bottom {3}." -f `
+        (Format-Point $MarginLeft),(Format-Point $MarginRight),(Format-Point $MarginTop),(Format-Point $MarginBottom))
     $images = @(Get-GuideImages $Page.Xml)
     Write-Host "V2 guide images: $($images.Count)"
     $items = foreach ($image in $images) {
@@ -979,16 +1075,15 @@ function Install-Utility {
     [void][IO.Directory]::CreateDirectory($script:StartMenuDirectory)
     $base = '-NoProfile -STA -NoExit -ExecutionPolicy Bypass -File "' + $destination + '"'
     $refresh = $base + (' -Action Refresh -Pages {0} -Orientation {1} -GuideMode {2}' -f $ShortcutPages,$Orientation,$GuideMode)
-    foreach ($pair in @(
-        @('StartX',$StartX),@('StartY',$StartY),@('PagePitchPoints',$PagePitchPoints))) {
+    foreach ($pair in @(@('StartX',$StartX),@('StartY',$StartY))) {
         $refresh += ' -' + $pair[0] + ' ' + (Format-Point ([double]$pair[1]))
     }
     if ($HideMargins) { $refresh += ' -HideMargins' }
     if ($ConsolePicker) { $refresh += ' -ConsolePicker' }
     $shortcuts = @(
-        @('Refresh OneNote Page Guides.lnk',$refresh,'Choose a page and refresh visual guides using saved margins'),
+        @('Refresh OneNote Page Guides.lnk',$refresh,'Choose a page and refresh visual guides using saved geometry'),
         @('Remove OneNote Page Guides.lnk',($base+' -Action Remove'),'Choose a page and remove guide images before printing'),
-        @('Configure OneNote Page Guide Margins.lnk',($base+' -Action Configure'),'Adjust the margins used by Add and Refresh'),
+        @('Configure OneNote Page Guide Margins.lnk',($base+' -Action Configure'),'Adjust the geometry and margins used by Add and Refresh'),
         @('OneNote Page Guides Status.lnk',($base+' -Action Status'),'Read-only guide status'),
         @('OneNote Page Guides Self-Test.lnk',($base+' -Action SelfTest'),'Local self-tests without connecting to OneNote')
     )
@@ -1002,7 +1097,7 @@ function Install-Utility {
             New-UtilityShortcut (Join-Path $desktop $entry[0]) $entry[1] $entry[2]
         }
     }
-    Write-Host 'OneNote Page Guides 2.5.0 installed. No OneNote content was changed.'
+    Write-Host 'OneNote Page Guides 2.6.0 installed. No OneNote content was changed.'
     Write-Host "Installed file: $destination"
     Write-Host 'Shortcuts keep the console open so errors are visible. Close it after use.'
 }
@@ -1037,7 +1132,8 @@ function Uninstall-Utility {
 }
 
 function Invoke-SelfTest {
-    # No COM, filesystem writes, or notebook reads. Tests execute the actual helpers.
+    # No COM or notebook reads. Tests execute the actual helpers; settings tests
+    # use an isolated temporary directory and remove it in a finally block.
     $script:TestCount = 0
     function Assert-Test {
         param([bool]$Condition,[string]$Name)
@@ -1048,13 +1144,52 @@ function Invoke-SelfTest {
     $tokens=$null; $errors=$null
     [void][Management.Automation.Language.Parser]::ParseFile($script:RunningFile,[ref]$tokens,[ref]$errors)
     Assert-Test (@($errors).Count -eq 0) 'PowerShell parser (this installed runtime)'
-    $portrait = Get-Geometry -PaperOrientation Portrait -Mode Paper -Left 1 -Right 1 -Top .5 -Bottom .5 -Pitch 0
-    Assert-Test ($portrait.FrameWidth -eq 612 -and $portrait.FrameHeight -eq 792) 'Letter paper dimensions'
+    $savedState = @{}
+    foreach ($name in @('InstallDirectory','SettingsPath','InvocationParameters','PageSizeProfile',
+        'PageWidthPoints','PageHeightPoints','PagePitchPoints','PageWidthAvailable','PageHeightAvailable',
+        'MarginLeft','MarginRight','MarginTop','MarginBottom','ResetSettings')) {
+        $savedState[$name] = Get-Variable -Name $name -Scope Script -ValueOnly
+    }
+    $testDirectory = Join-Path ([IO.Path]::GetTempPath()) ('OneNotePageGuides-SelfTest-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void][IO.Directory]::CreateDirectory($testDirectory)
+        $script:InstallDirectory = $testDirectory
+        $script:SettingsPath = Join-Path $testDirectory 'settings.json'
+        @{schemaVersion=1;MarginLeft=0.75;MarginRight=0.8;MarginTop=0.4;MarginBottom=0.45} |
+            ConvertTo-Json | Set-Content -LiteralPath $script:SettingsPath -Encoding UTF8
+        $script:InvocationParameters = @()
+        $script:PageSizeProfile = 'OneNotePdfLetter'; $script:MarginLeft = 1
+        Import-UserSettings
+        Assert-Test ($PageSizeProfile -ceq 'OneNotePdfLetter' -and $MarginLeft -eq 0.75) 'Version-1 margin settings use the new calibrated default'
+        $before = [IO.File]::ReadAllText($script:SettingsPath)
+        $script:InvocationParameters = @('MarginLeft'); $script:MarginLeft = 0.25
+        Import-UserSettings
+        Assert-Test ($MarginLeft -eq 0.25 -and [IO.File]::ReadAllText($script:SettingsPath) -ceq $before) 'CLI setting overrides saved value without rewriting settings'
+        $script:ResetSettings = $true
+        Configure-Settings
+        Assert-Test (-not (Test-Path -LiteralPath $script:SettingsPath)) 'ResetSettings removes all saved configuration'
+    }
+    finally {
+        if (Test-Path -LiteralPath $testDirectory) { Remove-Item -LiteralPath $testDirectory -Recurse -Force -Confirm:$false }
+        foreach ($name in $savedState.Keys) { Set-Variable -Name $name -Value $savedState[$name] -Scope Script }
+    }
+    $portrait = Get-Geometry -Profile Letter -PaperOrientation Portrait -Mode Paper -Left 1 -Right 1 -Top .5 -Bottom .5 -Pitch 0
+    Assert-Test ($portrait.FrameWidth -eq 612 -and $portrait.FrameHeight -eq 792 -and $portrait.Pitch -eq 792) 'Standard Letter portrait and automatic pitch'
     Assert-Test ($portrait.Left -eq 72 -and ($portrait.FrameWidth-$portrait.Right) -eq 540) 'LEFT and RIGHT margin bounds'
     Assert-Test ($portrait.Top -eq 36 -and ($portrait.FrameHeight-$portrait.Bottom) -eq 756) 'TOP and BOTTOM margin bounds'
-    $landscape = Get-Geometry -PaperOrientation Landscape -Mode Paper -Left 1 -Right 1 -Top .5 -Bottom .5 -Pitch 0
-    Assert-Test ($landscape.FrameWidth -eq 792 -and $landscape.FrameHeight -eq 612) 'Landscape dimensions'
-    $content = Get-Geometry -PaperOrientation Portrait -Mode PrintArea -Left 1 -Right 1 -Top .5 -Bottom .5 -Pitch 710
+    $landscape = Get-Geometry -Profile Letter -PaperOrientation Landscape -Mode Paper -Left 1 -Right 1 -Top .5 -Bottom .5 -Pitch 0
+    Assert-Test ($landscape.FrameWidth -eq 792 -and $landscape.FrameHeight -eq 612 -and $landscape.Pitch -eq 612) 'Standard Letter landscape and automatic pitch'
+    $calibrated = Get-Geometry -Profile OneNotePdfLetter -PaperOrientation Portrait -Mode Paper -Left 1 -Right 1 -Top .5 -Bottom .5 -Pitch 0
+    Assert-Test ($calibrated.FrameWidth -eq 611.4 -and $calibrated.FrameHeight -eq 792.84 -and $calibrated.Pitch -eq 792.84) 'OneNote PDF Letter portrait and automatic pitch'
+    $calibratedLandscape = Get-Geometry -Profile OneNotePdfLetter -PaperOrientation Landscape -Mode Paper -Left 1 -Right 1 -Top .5 -Bottom .5 -Pitch 0
+    Assert-Test ($calibratedLandscape.FrameWidth -eq 792.84 -and $calibratedLandscape.FrameHeight -eq 611.4 -and $calibratedLandscape.Pitch -eq 611.4) 'OneNote PDF Letter landscape and automatic pitch'
+    Assert-Test ($calibrated.PrintableWidth -eq 467.4 -and $calibrated.PrintableHeight -eq 720.84) 'Calibrated default-margin printable area'
+    $custom = Get-Geometry -Profile Custom -CustomWidth 500 -CustomHeight 700 -CustomDimensionsAvailable -PaperOrientation Portrait -Mode Paper -Pitch 710
+    Assert-Test ($custom.FrameWidth -eq 500 -and $custom.FrameHeight -eq 700 -and $custom.Pitch -eq 710) 'Custom dimensions and explicit pitch'
+    $failed=$false
+    try { [void](Get-Geometry -Profile Custom -CustomWidth 0 -CustomHeight 700 -CustomDimensionsAvailable) } catch { $failed=$true }
+    Assert-Test $failed 'Invalid custom dimensions rejected'
+    $content = Get-Geometry -Profile Letter -PaperOrientation Portrait -Mode PrintArea -Left 1 -Right 1 -Top .5 -Bottom .5 -Pitch 710
     Assert-Test ($content.FrameWidth -eq 468 -and $content.FrameHeight -eq 710 -and $content.Pitch -eq 710) 'Independent PrintArea pitch'
     $failed=$false
     try { [void](Get-Geometry -PaperOrientation Portrait -Mode Paper -Left 1 -Right 1 -Top .5 -Bottom .5 -Pitch 720) } catch { $failed=$true }
@@ -1097,12 +1232,23 @@ function Invoke-SelfTest {
     }
     finally { if ($null -ne $bitmap) { $bitmap.Dispose() }; $stream.Dispose() }
     $batch = [guid]::NewGuid().ToString('N')
+    $calibratedPayload = New-GuidePayload -Id 'CALIBRATED' -Geometry $calibrated -Png $png -Batch $batch -Count 6 -X 0 -Y 0
+    $calibratedImages = @(Get-GuideImages $calibratedPayload $batch)
+    $expectedY = @(0,792.84,1585.68,2378.52,3171.36,3964.20)
+    $positionsMatch = $calibratedImages.Count -eq $expectedY.Count
+    for ($i=0; $positionsMatch -and $i -lt $expectedY.Count; $i++) {
+        $positionsMatch = [Math]::Abs((Get-ImageDescriptor $calibratedImages[$i]).Y - $expectedY[$i]) -lt 0.001
+    }
+    Assert-Test $positionsMatch 'Six calibrated pages use 792.84-point increments'
     $payload = New-GuidePayload -Id 'TEST&ID' -Geometry $portrait -Png $png -Batch $batch -Count 2 -X 5 -Y 20
     Assert-GuidePayload $payload 'TEST&ID'
     $roundtrip = Read-SafeXml $payload.OuterXml
     $images = @(Get-GuideImages $roundtrip $batch)
     Assert-Test ($images.Count -eq 2) 'Payload XML round-trip and batch metadata'
-    Assert-Test ((Get-ImageDescriptor $images[1]).Y -eq 812) 'Second guide uses origin plus pitch'
+    Assert-Test ((Get-ImageDescriptor $images[1]).Y -eq 812) 'Second standard-Letter guide uses origin plus pitch'
+    $marker = (Get-ImageDescriptor $images[0]).Marker
+    Assert-Test ($marker.Contains(';profile=Letter;') -and $marker.Contains(';width=612;') -and
+        $marker.Contains(';height=792;')) 'New metadata includes profile and effective dimensions'
     $ordinary = Add-XmlChild $roundtrip.DocumentElement 'Image' @{alt='OneNotePageGuidesV2 v2;not-a-guide'}
     Assert-Test (@(Get-GuideImages $roundtrip).Count -eq 2) 'Ordinary images ignored by removal selector'
     $nested = Add-XmlChild $roundtrip.DocumentElement 'Outline'
@@ -1230,19 +1376,19 @@ $pageMutex = $null
 try {
     Assert-Windows
     Initialize-Paths
-    if ($Action -in @('Add','Refresh','Install','Configure') -and -not ($Action -eq 'Configure' -and $ResetSettings)) {
+    if ($Action -in @('Status','Add','Refresh','Install','Configure') -and -not ($Action -eq 'Configure' -and $ResetSettings)) {
         Import-UserSettings
     }
     Write-Host "OneNote Page Guides $($script:Version) - $Action"
     if ($Action -eq 'SelfTest') { Invoke-SelfTest; return }
     if ($Action -eq 'Configure') {
-        $operation = if ($ResetSettings) { 'Reset saved margins' } else { 'Save adjustable margins' }
-        if ($PSCmdlet.ShouldProcess($script:SettingsPath,$operation)) { Configure-Margins }
+        $operation = if ($ResetSettings) { 'Reset saved geometry and margins' } else { 'Save page geometry and margins' }
+        if ($PSCmdlet.ShouldProcess($script:SettingsPath,$operation)) { Configure-Settings }
         return
     }
     if ($Action -eq 'Install') {
         [void](Get-Geometry) # validate shortcut geometry before changing installed files
-        if ($PSCmdlet.ShouldProcess($script:InstallDirectory,'Install V2.5.0 and replace utility shortcuts')) {
+        if ($PSCmdlet.ShouldProcess($script:InstallDirectory,'Install V2.6.0 and replace utility shortcuts')) {
             Save-UserSettings
             Install-Utility
         }
@@ -1285,8 +1431,8 @@ try {
         $batch = [guid]::NewGuid().ToString('N')
         $payload = New-GuidePayload -Id $pinnedId -Geometry $geometry -Png $png -Batch $batch
         Assert-GuidePayload $payload $pinnedId
-        Write-Host ('Plan: {0} {1} frames; size {2} x {3} pt; pitch {4} pt; origin {5}, {6} pt.' -f `
-            $Pages,$GuideMode,$geometry.FrameWidth,$geometry.FrameHeight,$geometry.Pitch,$StartX,$StartY)
+        Write-Host ('Plan: {0} {1} frames; profile {2}; size {3} x {4} pt; pitch {5} pt; origin {6}, {7} pt.' -f `
+            $Pages,$GuideMode,$geometry.Profile,$geometry.FrameWidth,$geometry.FrameHeight,$geometry.Pitch,$StartX,$StartY)
         Write-Warning 'These are uncalibrated visual guides, not native print boundaries. Remove before export/printing.'
     }
     [void](Get-PageTimestamp $page)
