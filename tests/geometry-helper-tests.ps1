@@ -23,7 +23,14 @@ $g = Get-Geometry -Profile Letter -Mode PrintArea -GuideWidth 500 -GuideHeight 7
 Assert-Equal $g.GuideHeight 725.72 'guide height remains independent'
 Assert-Equal $g.PageAdvance 689.33 'page advance remains independent'
 Assert-Equal $g.Overlap 36.39 'overlap is height minus advance' .000001
-$payload = New-GuidePayload -Id 'geometry-test' -Geometry $g -Png ([Convert]::ToBase64String([byte[]](1..40))) -Batch 'batch' -Count 3
+# Exercise the production GDI+ encoder and its PNG-signature validation.  Do
+# not substitute arbitrary Base64 here: New-GuidePayload deliberately rejects
+# anything that is not an actual PNG before constructing OneNote XML.
+$png = New-GuidePng $g -WithoutMargins
+Assert-PngData $png
+$pngBytes = [Convert]::FromBase64String($png)
+Assert-True ($pngBytes[0] -eq 137 -and $pngBytes[1] -eq 80 -and $pngBytes[2] -eq 78 -and $pngBytes[3] -eq 71) 'guide generator returns PNG signature bytes'
+$payload = New-GuidePayload -Id 'geometry-test' -Geometry $g -Png $png -Batch 'batch' -Count 3
 $ns = New-NamespaceManager $payload
 $positions = @($payload.SelectNodes('/one:Page/one:Image/one:Position',$ns) | ForEach-Object { Read-Point $_.GetAttribute('y') })
 Assert-Equal $positions[0] 23 'first sheet uses calibrated origin'
