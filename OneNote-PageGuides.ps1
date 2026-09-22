@@ -15,8 +15,9 @@
 
     Paper mode shows full calibrated sheets plus optional margin rectangles.
     PrintArea mode shows content-sized frames, not physical paper/margins.
-    PagePitchPoints is independent of the paper size. NO interval is guaranteed
-    to match OneNote printing. Calibrate against a disposable-page export.
+    PagePitchPoints is a migration alias for PageAdvancePoints. Guide height and
+    page advance are independent. NO interval is guaranteed to match OneNote
+    printing. Calibrate against a disposable-page export.
     Remove guides before print/export. Do not edit the page while a write runs.
 
     Designed for Windows PowerShell 5.1. SelfTest needs Windows/System.Drawing,
@@ -58,10 +59,15 @@ param(
     [ValidateRange(0.0,4.0)][double]$MarginRight = 1.0,
     [ValidateRange(0.0,4.0)][double]$MarginTop = 0.5,
     [ValidateRange(0.0,4.0)][double]$MarginBottom = 0.5,
-    [ValidateRange(0.0,900000.0)][double]$StartX = 0.0,
-    [ValidateRange(0.0,900000.0)][double]$StartY = 0.0,
-    # 0 = automatic. Paper: paper height. PrintArea: paper height minus margins.
+    [ValidateRange(0.0,900000.0)][double]$OriginXPoints = 0.0,
+    [ValidateRange(0.0,900000.0)][double]$OriginYPoints = 0.0,
+    [ValidateRange(0.0,10000.0)][double]$GuideWidthPoints = 0.0,
+    [ValidateRange(0.0,10000.0)][double]$GuideHeightPoints = 0.0,
+    [ValidateRange(0.0,10000.0)][double]$PageAdvancePoints = 0.0,
+    # Migration alias only. It supplies PageAdvancePoints, never guide height.
     [ValidateRange(0.0,10000.0)][double]$PagePitchPoints = 0.0,
+    [Alias('StartX')][ValidateRange(0.0,900000.0)][double]$LegacyOriginXPoints = 0.0,
+    [Alias('StartY')][ValidateRange(0.0,900000.0)][double]$LegacyOriginYPoints = 0.0,
     [switch]$HideMargins,
     [string]$PageId = '',
     [string]$PageFilter = '',
@@ -90,6 +96,13 @@ $script:InvocationParameters = @($PSBoundParameters.Keys)
 $script:PageWidthAvailable = $script:InvocationParameters -contains 'PageWidthPoints'
 $script:PageHeightAvailable = $script:InvocationParameters -contains 'PageHeightPoints'
 
+if ($script:InvocationParameters -contains 'PagePitchPoints') {
+    if ($script:InvocationParameters -contains 'PageAdvancePoints') { throw 'Specify PageAdvancePoints or the legacy PagePitchPoints alias, not both.' }
+    $PageAdvancePoints = $PagePitchPoints
+}
+if ($script:InvocationParameters -contains 'LegacyOriginXPoints') { $OriginXPoints = $LegacyOriginXPoints }
+if ($script:InvocationParameters -contains 'LegacyOriginYPoints') { $OriginYPoints = $LegacyOriginYPoints }
+
 function Assert-Windows {
     if ($env:OS -ne 'Windows_NT') {
         throw 'Use Windows PowerShell 5.1 on Windows with desktop OneNote. No changes made.'
@@ -116,7 +129,7 @@ function Import-UserSettings {
         $settings = Get-Content -LiteralPath $script:SettingsPath -Raw | ConvertFrom-Json
         $schema = 1
         if ($null -ne $settings.PSObject.Properties['schemaVersion']) { $schema = [int]$settings.schemaVersion }
-        if ($schema -lt 1 -or $schema -gt 2) { throw "Unsupported settings schema version $schema." }
+        if ($schema -lt 1 -or $schema -gt 3) { throw "Unsupported settings schema version $schema." }
         foreach ($name in @('MarginLeft','MarginRight','MarginTop','MarginBottom')) {
             if ($script:InvocationParameters -contains $name) { continue }
             $property = $settings.PSObject.Properties[$name]
@@ -144,13 +157,27 @@ function Import-UserSettings {
                 Set-Variable -Name ($name.Replace('Points','Available')) -Value $true -Scope Script
             }
         }
-        if ($script:InvocationParameters -notcontains 'PagePitchPoints' -and
+        foreach ($name in @('GuideWidthPoints','GuideHeightPoints','PageAdvancePoints','OriginXPoints','OriginYPoints')) {
+            if ($script:InvocationParameters -contains $name -or
+                ($name -eq 'PageAdvancePoints' -and $script:InvocationParameters -contains 'PagePitchPoints')) { continue }
+            $property=$settings.PSObject.Properties[$name]
+            if ($null -eq $property) { continue }
+            $value=[double]$property.Value
+            $maximum=if ($name -in @('OriginXPoints','OriginYPoints')) { 900000 } else { 10000 }
+            if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -lt 0 -or $value -gt $maximum) {
+                throw "Saved $name must be 0 through $maximum points."
+            }
+            Set-Variable -Name $name -Value $value -Scope Script
+        }
+        # Schema 1/2 migration: pitch maps only to advance. It must never resize a guide.
+        if ($script:InvocationParameters -notcontains 'PageAdvancePoints' -and
+            $null -eq $settings.PSObject.Properties['PageAdvancePoints'] -and
             $null -ne $settings.PSObject.Properties['PagePitchPoints']) {
-            $value = [double]$settings.PagePitchPoints
+            $value=[double]$settings.PagePitchPoints
             if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -lt 0 -or $value -gt 10000) {
                 throw 'Saved PagePitchPoints must be 0 through 10000 points.'
             }
-            $script:PagePitchPoints = $value
+            $script:PageAdvancePoints=$value
         }
     }
     catch {
@@ -161,11 +188,15 @@ function Import-UserSettings {
 function Save-UserSettings {
     [void][IO.Directory]::CreateDirectory($script:InstallDirectory)
     $settings = [ordered]@{
-        schemaVersion = 2
+        schemaVersion = 3
         PageSizeProfile = $PageSizeProfile
         PageWidthPoints = $PageWidthPoints
         PageHeightPoints = $PageHeightPoints
-        PagePitchPoints = $PagePitchPoints
+        GuideWidthPoints = $GuideWidthPoints
+        GuideHeightPoints = $GuideHeightPoints
+        PageAdvancePoints = $PageAdvancePoints
+        OriginXPoints = $OriginXPoints
+        OriginYPoints = $OriginYPoints
         MarginLeft = $MarginLeft
         MarginRight = $MarginRight
         MarginTop = $MarginTop
@@ -213,7 +244,7 @@ function Configure-Settings {
         return
     }
     $explicit = @('MarginLeft','MarginRight','MarginTop','MarginBottom','PageSizeProfile',
-        'PageWidthPoints','PageHeightPoints','PagePitchPoints') |
+        'PageWidthPoints','PageHeightPoints','GuideWidthPoints','GuideHeightPoints','PageAdvancePoints','OriginXPoints','OriginYPoints') |
         Where-Object { $script:InvocationParameters -contains $_ }
     if (@($explicit).Count -eq 0) {
         Write-Host "Current page-size profile: $PageSizeProfile"
@@ -228,7 +259,9 @@ function Configure-Settings {
             $script:PageHeightPoints = Read-GeometrySetting 'Portrait page height' $PageHeightPoints
             $script:PageWidthAvailable = $true; $script:PageHeightAvailable = $true
         }
-        $script:PagePitchPoints = Read-GeometrySetting 'Page pitch' $PagePitchPoints -AllowAutomatic
+        $script:GuideWidthPoints = Read-GeometrySetting 'Guide width' $GuideWidthPoints -AllowAutomatic
+        $script:GuideHeightPoints = Read-GeometrySetting 'Guide height' $GuideHeightPoints -AllowAutomatic
+        $script:PageAdvancePoints = Read-GeometrySetting 'Page advance' $PageAdvancePoints -AllowAutomatic
         Write-Host 'Margin examples:'
         Write-Host '  Default: left/right 1 inch; top/bottom 0.5 inch.'
         Write-Host '  Narrow: 0.5 inch on every side.'
@@ -240,9 +273,9 @@ function Configure-Settings {
     }
     $configuredGeometry = Get-Geometry
     Save-UserSettings
-    Write-Host ("Saved geometry: profile {0}; effective {1} x {2} pt; pitch {3}." -f `
-        $PageSizeProfile,(Format-Point $configuredGeometry.PaperWidth),(Format-Point $configuredGeometry.PaperHeight),
-        $(if ($PagePitchPoints -eq 0) { 'automatic' } else { (Format-Point $PagePitchPoints) + ' pt' }))
+    Write-Host ("Saved geometry: profile {0}; physical {1} x {2} pt; page advance {3}." -f `
+        $PageSizeProfile,(Format-Point $configuredGeometry.PhysicalSheetWidth),(Format-Point $configuredGeometry.PhysicalSheetHeight),
+        $(if ($PageAdvancePoints -eq 0) { 'automatic' } else { (Format-Point $PageAdvancePoints) + ' pt' }))
     Write-Host ("Saved margins (inches): left {0}, right {1}, top {2}, bottom {3}." -f `
         (Format-Point $MarginLeft),(Format-Point $MarginRight),(Format-Point $MarginTop),(Format-Point $MarginBottom))
     Write-Host 'Refresh and Add now use these values unless parameters are supplied explicitly.'
@@ -545,12 +578,15 @@ function Get-Geometry {
     param([string]$PaperOrientation = $Orientation, [string]$Mode = $GuideMode,
           [double]$Left = $MarginLeft, [double]$Right = $MarginRight,
           [double]$Top = $MarginTop, [double]$Bottom = $MarginBottom,
-          [double]$Pitch = $PagePitchPoints,
+          [double]$GuideWidth = $GuideWidthPoints,
+          [double]$GuideHeight = $GuideHeightPoints,
+          [double]$PageAdvance = $PageAdvancePoints,
+          [double]$OriginX = $OriginXPoints, [double]$OriginY = $OriginYPoints,
           [string]$Profile = $PageSizeProfile,
           [double]$CustomWidth = $PageWidthPoints,
           [double]$CustomHeight = $PageHeightPoints,
           [switch]$CustomDimensionsAvailable)
-    foreach ($value in @($Left,$Right,$Top,$Bottom,$Pitch,$CustomWidth,$CustomHeight)) {
+    foreach ($value in @($Left,$Right,$Top,$Bottom,$GuideWidth,$GuideHeight,$PageAdvance,$OriginX,$OriginY,$CustomWidth,$CustomHeight)) {
         if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -lt 0) {
             throw 'Geometry must use finite, nonnegative numbers.'
         }
@@ -568,24 +604,36 @@ function Get-Geometry {
         }
         default { throw "Unknown page-size profile '$Profile'." }
     }
-    $paperW = $portraitW; $paperH = $portraitH
-    if ($PaperOrientation -eq 'Landscape') { $paperW = $portraitH; $paperH = $portraitW }
-    $contentW = $paperW - 72.0*($Left+$Right)
-    $contentH = $paperH - 72.0*($Top+$Bottom)
-    if ($contentW -le 0 -or $contentH -le 0) { throw 'Margins leave no usable area.' }
-    $frameW = $paperW; $frameH = $paperH
-    if ($Mode -eq 'PrintArea') { $frameW = $contentW; $frameH = $contentH }
-    if ($Pitch -eq 0) { $Pitch = $frameH }
-    if ($Pitch -lt 10 -or $Pitch -gt 10000) { throw 'Page pitch must be 10 to 10000 points, or 0 for automatic.' }
-    if ($Mode -eq 'Paper' -and $Pitch -lt $paperH) {
-        throw 'Paper frames would overlap. Use PrintArea mode for a pitch smaller than the physical sheet height.'
+    $physicalW = $portraitW; $physicalH = $portraitH
+    if ($PaperOrientation -eq 'Landscape') { $physicalW = $portraitH; $physicalH = $portraitW }
+    # These remain physical output-sheet coordinates.
+    $outputLeft=72.0*$Left; $outputRight=72.0*$Right
+    $outputTop=72.0*$Top; $outputBottom=72.0*$Bottom
+    $printableW=$physicalW-$outputLeft-$outputRight
+    $printableH=$physicalH-$outputTop-$outputBottom
+    if ($printableW -le 0 -or $printableH -le 0) { throw 'Margins leave no usable printable area.' }
+    if ($GuideWidth -eq 0) { $GuideWidth = if ($Mode -eq 'Paper') { $physicalW } else { $printableW } }
+    if ($GuideHeight -eq 0) { $GuideHeight = if ($Mode -eq 'Paper') { $physicalH } else { $printableH } }
+    if ($PageAdvance -eq 0) { $PageAdvance = $GuideHeight }
+    foreach ($item in @(@('Guide width',$GuideWidth),@('Guide height',$GuideHeight),@('Page advance',$PageAdvance))) {
+        if ($item[1] -lt 10 -or $item[1] -gt 10000) { throw "$($item[0]) must be 10 to 10000 points, or 0 for automatic." }
     }
-    if ($Mode -eq 'PrintArea') { $frameH = $Pitch }
+    $overlap=$GuideHeight-$PageAdvance
+    if ($overlap -lt 0) { throw 'Page advance cannot exceed guide height; negative overlap would leave an unrepresented gap.' }
+    # Calibrate output-sheet coordinates into the independently sized OneNote guide.
+    $scaleX=$GuideWidth/$physicalW; $scaleY=$GuideHeight/$physicalH
     [pscustomobject]@{
-        Profile=$Profile; Orientation=$PaperOrientation
-        PaperWidth=$paperW; PaperHeight=$paperH; FrameWidth=$frameW; FrameHeight=$frameH
-        PrintableWidth=$contentW; PrintableHeight=$contentH; Pitch=$Pitch; Mode=$Mode
-        Left=72.0*$Left; Right=72.0*$Right; Top=72.0*$Top; Bottom=72.0*$Bottom
+        Profile=$Profile; Orientation=$PaperOrientation; Mode=$Mode
+        PhysicalSheetWidth=$physicalW; PhysicalSheetHeight=$physicalH
+        PrintableWidth=$printableW; PrintableHeight=$printableH
+        GuideWidth=$GuideWidth; GuideHeight=$GuideHeight; PageAdvance=$PageAdvance
+        OriginX=$OriginX; OriginY=$OriginY; Overlap=$overlap; OverlapRounded=[Math]::Round($overlap,1)
+        CalibrationScaleX=$scaleX; CalibrationScaleY=$scaleY
+        CalibrationTranslateX=$OriginX; CalibrationTranslateY=$OriginY
+        OutputMarginLeft=$outputLeft; OutputMarginRight=$outputRight
+        OutputMarginTop=$outputTop; OutputMarginBottom=$outputBottom
+        GuideInsetLeft=$outputLeft*$scaleX; GuideInsetRight=$outputRight*$scaleX
+        GuideInsetTop=$outputTop*$scaleY; GuideInsetBottom=$outputBottom*$scaleY
     }
 }
 
@@ -593,9 +641,9 @@ function New-GuidePng {
     param([Parameter(Mandatory)]$Geometry, [switch]$WithoutMargins)
     Add-Type -AssemblyName System.Drawing
     # Cap long custom frames to avoid allocating huge bitmaps.
-    $scale = [Math]::Min(2.0, 4096.0/[Math]::Max($Geometry.FrameWidth,$Geometry.FrameHeight))
-    $w = [int][Math]::Ceiling($Geometry.FrameWidth*$scale)
-    $h = [int][Math]::Ceiling($Geometry.FrameHeight*$scale)
+    $scale = [Math]::Min(2.0, 4096.0/[Math]::Max($Geometry.GuideWidth,$Geometry.GuideHeight))
+    $w = [int][Math]::Ceiling($Geometry.GuideWidth*$scale)
+    $h = [int][Math]::Ceiling($Geometry.GuideHeight*$scale)
     $bitmap=$null; $graphics=$null; $brush=$null; $pen=$null; $stream=$null
     try {
         $bitmap = [Drawing.Bitmap]::new($w,$h,[Drawing.Imaging.PixelFormat]::Format32bppArgb)
@@ -612,8 +660,10 @@ function New-GuidePng {
         if ($Geometry.Mode -eq 'Paper' -and -not $WithoutMargins) {
             $pen = [Drawing.Pen]::new([Drawing.Color]::FromArgb(150,140,140,140),[single][Math]::Max(1,0.75*$scale))
             $pen.DashStyle = [Drawing.Drawing2D.DashStyle]::Dash
-            $graphics.DrawRectangle($pen,[single]($Geometry.Left*$scale),[single]($Geometry.Top*$scale),
-                [single]($Geometry.PrintableWidth*$scale),[single]($Geometry.PrintableHeight*$scale))
+            $insetWidth=[single](($Geometry.GuideWidth-$Geometry.GuideInsetLeft-$Geometry.GuideInsetRight)*$scale)
+            $insetHeight=[single](($Geometry.GuideHeight-$Geometry.GuideInsetTop-$Geometry.GuideInsetBottom)*$scale)
+            $graphics.DrawRectangle($pen,[single]($Geometry.GuideInsetLeft*$scale),[single]($Geometry.GuideInsetTop*$scale),
+                $insetWidth,$insetHeight)
         }
         $stream = [IO.MemoryStream]::new()
         $bitmap.Save($stream,[Drawing.Imaging.ImageFormat]::Png)
@@ -639,14 +689,14 @@ function Assert-PngData {
 function New-GuidePayload {
     param([Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)]$Geometry,
           [Parameter(Mandatory)][string]$Png, [Parameter(Mandatory)][string]$Batch,
-          [int]$Count = $Pages, [double]$X = $StartX, [double]$Y = $StartY)
+          [int]$Count = $Pages, [double]$X = $Geometry.OriginX, [double]$Y = $Geometry.OriginY)
     Assert-PngData $Png
     $doc = New-PageDocument $Id
     for ($p=1; $p -le $Count; $p++) {
-        $yp = $Y + ($p-1)*$Geometry.Pitch
+        $yp = $Y + ($p-1)*$Geometry.PageAdvance
         [void](Read-Point (Format-Point $X))
         [void](Read-Point (Format-Point $yp))
-        if ($X+$Geometry.FrameWidth -gt 1000000 -or $yp+$Geometry.FrameHeight -gt 1000000) {
+        if ($X+$Geometry.GuideWidth -gt 1000000 -or $yp+$Geometry.GuideHeight -gt 1000000) {
             throw 'The requested guide layout exceeds OneNote coordinate limits.'
         }
         $image = Add-XmlChild $doc.DocumentElement 'Image' @{
@@ -654,11 +704,13 @@ function New-GuidePayload {
         }
         [void](Add-XmlChild $image 'Position' @{x=(Format-Point $X);y=(Format-Point $yp)})
         [void](Add-XmlChild $image 'Size' @{
-            width=(Format-Point $Geometry.FrameWidth);height=(Format-Point $Geometry.FrameHeight);isSetByUser='true'
+            width=(Format-Point $Geometry.GuideWidth);height=(Format-Point $Geometry.GuideHeight);isSetByUser='true'
         })
-        $marker = 'v2;version={0};batch={1};page={2};mode={3};pitch={4};profile={5};width={6};height={7};' -f `
-            $script:Version,$Batch,$p,$Geometry.Mode,(Format-Point $Geometry.Pitch),$Geometry.Profile,
-            (Format-Point $Geometry.PaperWidth),(Format-Point $Geometry.PaperHeight)
+        $marker = 'v2;version={0};batch={1};page={2};mode={3};advance={4};profile={5};physicalWidth={6};physicalHeight={7};guideWidth={8};guideHeight={9};overlap={10};originX={11};originY={12};' -f `
+            $script:Version,$Batch,$p,$Geometry.Mode,(Format-Point $Geometry.PageAdvance),$Geometry.Profile,
+            (Format-Point $Geometry.PhysicalSheetWidth),(Format-Point $Geometry.PhysicalSheetHeight),`
+            (Format-Point $Geometry.GuideWidth),(Format-Point $Geometry.GuideHeight),(Format-Point $Geometry.Overlap),`
+            (Format-Point $Geometry.OriginX),(Format-Point $Geometry.OriginY)
         [void](Add-XmlChild $image 'Meta' @{name=$script:MetaName;content=$marker})
         [void](Add-XmlChild $image 'Data' @{} $Png)
     }
@@ -701,6 +753,14 @@ function Assert-GuidePayload {
             throw 'Invalid guide child order or unexpected XML content.'
         }
         $descriptor = Get-ImageDescriptor $image
+        if ($descriptor.Marker -match ';advance=([^;]+);.*;guideWidth=([^;]+);guideHeight=([^;]+);overlap=([^;]+);') {
+            $advance=Read-Point $Matches[1]; $guideWidth=Read-Point $Matches[2]
+            $guideHeight=Read-Point $Matches[3]; $overlap=Read-Point $Matches[4]
+            if ([Math]::Abs($descriptor.Width-$guideWidth) -gt .01 -or [Math]::Abs($descriptor.Height-$guideHeight) -gt .01 -or
+                [Math]::Abs(($guideHeight-$advance)-$overlap) -gt .011 -or $overlap -lt 0) {
+                throw 'Guide metadata does not match its independently validated geometry.'
+            }
+        }
         if (-not $descriptor.Background -or $descriptor.Width -le 0 -or $descriptor.Height -le 0) {
             throw 'Only positive-size background guide images may be inserted.'
         }
@@ -814,7 +874,7 @@ function Save-Journal {
 
 function Start-Journal {
     param([string]$Operation, [Parameter(Mandatory)]$Target,
-          [AllowEmptyCollection()][object[]]$Before, [string]$Batch = '', [string]$NewPayloadXml = '')
+          [AllowEmptyCollection()][object[]]$Before, [string]$Batch = '', [string]$NewPayloadXml = '', $Geometry = $null)
     [void][IO.Directory]::CreateDirectory($script:BackupDirectory)
     $transaction = [guid]::NewGuid().ToString('N')
     $file = '{0}-{1}-{2}.json' -f [datetime]::Now.ToString('yyyyMMdd-HHmmss'),$Operation,$transaction
@@ -823,7 +883,7 @@ function Start-Journal {
         Format='OneNotePageGuides-Recovery-2.4'; TransactionId=$transaction
         PageId=$Target.PageId; PageName=$Target.PageName; Notebook=$Target.Notebook; Section=$Target.Section
         Action=$Operation; CreatedUtc=[datetime]::UtcNow.ToString('o'); UpdatedUtc=''
-        State='Prepared'; NewBatch=$Batch; NewPayloadXml=$NewPayloadXml; Before=@($Before); DeletedIds=@(); Error=''
+        State='Prepared'; NewBatch=$Batch; NewPayloadXml=$NewPayloadXml; Geometry=$Geometry; Before=@($Before); DeletedIds=@(); Error=''
     }
     Save-Journal
     Write-Host "Guide-only recovery journal: $($script:JournalPath)"
@@ -908,10 +968,18 @@ function Show-GuideStatus {
     param($Page,$Target)
     Write-TargetSummary $Target
     $geometry = Get-Geometry
-    $pitchKind = if ($PagePitchPoints -eq 0) { 'automatic' } else { 'explicit' }
-    Write-Host ("Geometry: profile {0}; {1}; frame {2} x {3} pt; pitch {4} pt ({5})." -f `
-        $geometry.Profile,$geometry.Orientation,(Format-Point $geometry.FrameWidth),
-        (Format-Point $geometry.FrameHeight),(Format-Point $geometry.Pitch),$pitchKind)
+    $advanceKind = if ($PageAdvancePoints -eq 0) { 'automatic' } else { 'explicit' }
+    Write-Host ("Geometry: profile {0}; {1}; physical {2} x {3} pt; printable {4} x {5} pt." -f `
+        $geometry.Profile,$geometry.Orientation,(Format-Point $geometry.PhysicalSheetWidth),
+        (Format-Point $geometry.PhysicalSheetHeight),(Format-Point $geometry.PrintableWidth),(Format-Point $geometry.PrintableHeight))
+    Write-Host ("Guide: {0} x {1} pt; advance {2} pt ({3}); overlap {4} pt (rounded {5:N2}); origin {6}, {7} pt." -f `
+        (Format-Point $geometry.GuideWidth),(Format-Point $geometry.GuideHeight),(Format-Point $geometry.PageAdvance),
+        $advanceKind,(Format-Point $geometry.Overlap),$geometry.OverlapRounded,(Format-Point $geometry.OriginX),(Format-Point $geometry.OriginY))
+    Write-Host ("Calibration: scale {0}, {1}; translation {2}, {3} pt; guide insets L/R/T/B {4}/{5}/{6}/{7} pt." -f `
+        (Format-Point $geometry.CalibrationScaleX),(Format-Point $geometry.CalibrationScaleY),
+        (Format-Point $geometry.CalibrationTranslateX),(Format-Point $geometry.CalibrationTranslateY),
+        (Format-Point $geometry.GuideInsetLeft),(Format-Point $geometry.GuideInsetRight),
+        (Format-Point $geometry.GuideInsetTop),(Format-Point $geometry.GuideInsetBottom))
     Write-Host ("Margins (inches): left {0}, right {1}, top {2}, bottom {3}." -f `
         (Format-Point $MarginLeft),(Format-Point $MarginRight),(Format-Point $MarginTop),(Format-Point $MarginBottom))
     $images = @(Get-GuideImages $Page.Xml)
@@ -1146,7 +1214,7 @@ function Invoke-SelfTest {
     Assert-Test (@($errors).Count -eq 0) 'PowerShell parser (this installed runtime)'
     $savedState = @{}
     foreach ($name in @('InstallDirectory','SettingsPath','InvocationParameters','PageSizeProfile',
-        'PageWidthPoints','PageHeightPoints','PagePitchPoints','PageWidthAvailable','PageHeightAvailable',
+        'PageWidthPoints','PageHeightPoints','PagePitchPoints','GuideWidthPoints','GuideHeightPoints','PageAdvancePoints','OriginXPoints','OriginYPoints','PageWidthAvailable','PageHeightAvailable',
         'MarginLeft','MarginRight','MarginTop','MarginBottom','ResetSettings')) {
         $savedState[$name] = Get-Variable -Name $name -Scope Script -ValueOnly
     }
@@ -1165,6 +1233,11 @@ function Invoke-SelfTest {
         $script:InvocationParameters = @('MarginLeft'); $script:MarginLeft = 0.25
         Import-UserSettings
         Assert-Test ($MarginLeft -eq 0.25 -and [IO.File]::ReadAllText($script:SettingsPath) -ceq $before) 'CLI setting overrides saved value without rewriting settings'
+        @{schemaVersion=2;PagePitchPoints=689.33} | ConvertTo-Json |
+            Set-Content -LiteralPath $script:SettingsPath -Encoding UTF8
+        $script:InvocationParameters=@(); $script:PageAdvancePoints=0; $script:GuideHeightPoints=725.72
+        Import-UserSettings
+        Assert-Test ($PageAdvancePoints -eq 689.33 -and $GuideHeightPoints -eq 725.72) 'Legacy PagePitchPoints migrates only to page advance'
         $script:ResetSettings = $true
         Configure-Settings
         Assert-Test (-not (Test-Path -LiteralPath $script:SettingsPath)) 'ResetSettings removes all saved configuration'
@@ -1173,27 +1246,31 @@ function Invoke-SelfTest {
         if (Test-Path -LiteralPath $testDirectory) { Remove-Item -LiteralPath $testDirectory -Recurse -Force -Confirm:$false }
         foreach ($name in $savedState.Keys) { Set-Variable -Name $name -Value $savedState[$name] -Scope Script }
     }
-    $portrait = Get-Geometry -Profile Letter -PaperOrientation Portrait -Mode Paper -Left 1 -Right 1 -Top .5 -Bottom .5 -Pitch 0
-    Assert-Test ($portrait.FrameWidth -eq 612 -and $portrait.FrameHeight -eq 792 -and $portrait.Pitch -eq 792) 'Standard Letter portrait and automatic pitch'
-    Assert-Test ($portrait.Left -eq 72 -and ($portrait.FrameWidth-$portrait.Right) -eq 540) 'LEFT and RIGHT margin bounds'
-    Assert-Test ($portrait.Top -eq 36 -and ($portrait.FrameHeight-$portrait.Bottom) -eq 756) 'TOP and BOTTOM margin bounds'
-    $landscape = Get-Geometry -Profile Letter -PaperOrientation Landscape -Mode Paper -Left 1 -Right 1 -Top .5 -Bottom .5 -Pitch 0
-    Assert-Test ($landscape.FrameWidth -eq 792 -and $landscape.FrameHeight -eq 612 -and $landscape.Pitch -eq 612) 'Standard Letter landscape and automatic pitch'
-    $calibrated = Get-Geometry -Profile OneNotePdfLetter -PaperOrientation Portrait -Mode Paper -Left 1 -Right 1 -Top .5 -Bottom .5 -Pitch 0
-    Assert-Test ($calibrated.FrameWidth -eq 611.4 -and $calibrated.FrameHeight -eq 792.84 -and $calibrated.Pitch -eq 792.84) 'OneNote PDF Letter portrait and automatic pitch'
-    $calibratedLandscape = Get-Geometry -Profile OneNotePdfLetter -PaperOrientation Landscape -Mode Paper -Left 1 -Right 1 -Top .5 -Bottom .5 -Pitch 0
-    Assert-Test ($calibratedLandscape.FrameWidth -eq 792.84 -and $calibratedLandscape.FrameHeight -eq 611.4 -and $calibratedLandscape.Pitch -eq 611.4) 'OneNote PDF Letter landscape and automatic pitch'
+    $portrait = Get-Geometry -Profile Letter -PaperOrientation Portrait -Mode Paper -Left 1 -Right 1 -Top .5 -Bottom .5
+    Assert-Test ($portrait.PhysicalSheetWidth -eq 612 -and $portrait.PhysicalSheetHeight -eq 792) 'Physical Letter sheet dimensions'
+    Assert-Test ($portrait.GuideWidth -eq 612 -and $portrait.GuideHeight -eq 792 -and $portrait.PageAdvance -eq 792) 'Automatic paper guide dimensions and advance'
+    Assert-Test ($portrait.OutputMarginLeft -eq 72 -and $portrait.OutputMarginTop -eq 36) 'Margins remain in output-sheet coordinates'
+    Assert-Test ($portrait.GuideInsetLeft -eq 72 -and $portrait.GuideInsetTop -eq 36) 'Unit calibration converts margins to guide insets'
+    $landscape = Get-Geometry -Profile Letter -PaperOrientation Landscape -Mode Paper -Left 1 -Right 1 -Top .5 -Bottom .5
+    Assert-Test ($landscape.PhysicalSheetWidth -eq 792 -and $landscape.PhysicalSheetHeight -eq 612) 'Standard Letter landscape physical sheet'
+    $calibrated = Get-Geometry -Profile OneNotePdfLetter -PaperOrientation Portrait -Mode Paper -Left 1 -Right 1 -Top .5 -Bottom .5
     Assert-Test ($calibrated.PrintableWidth -eq 467.4 -and $calibrated.PrintableHeight -eq 720.84) 'Calibrated default-margin printable area'
-    $custom = Get-Geometry -Profile Custom -CustomWidth 500 -CustomHeight 700 -CustomDimensionsAvailable -PaperOrientation Portrait -Mode Paper -Pitch 710
-    Assert-Test ($custom.FrameWidth -eq 500 -and $custom.FrameHeight -eq 700 -and $custom.Pitch -eq 710) 'Custom dimensions and explicit pitch'
+    $calibratedLandscape = Get-Geometry -Profile OneNotePdfLetter -PaperOrientation Landscape -Mode Paper -Left 1 -Right 1 -Top .5 -Bottom .5
+    Assert-Test ($calibratedLandscape.GuideWidth -eq 792.84 -and $calibratedLandscape.GuideHeight -eq 611.4) 'OneNote PDF Letter landscape guide'
+    $custom = Get-Geometry -Profile Custom -CustomWidth 500 -CustomHeight 700 -CustomDimensionsAvailable -GuideWidth 480 -GuideHeight 680 -PageAdvance 650 -OriginX 12 -OriginY 34
+    Assert-Test ($custom.PhysicalSheetWidth -eq 500 -and $custom.GuideHeight -eq 680 -and $custom.PageAdvance -eq 650 -and $custom.OriginY -eq 34) 'Independent custom geometry properties'
     $failed=$false
     try { [void](Get-Geometry -Profile Custom -CustomWidth 0 -CustomHeight 700 -CustomDimensionsAvailable) } catch { $failed=$true }
     Assert-Test $failed 'Invalid custom dimensions rejected'
-    $content = Get-Geometry -Profile Letter -PaperOrientation Portrait -Mode PrintArea -Left 1 -Right 1 -Top .5 -Bottom .5 -Pitch 710
-    Assert-Test ($content.FrameWidth -eq 468 -and $content.FrameHeight -eq 710 -and $content.Pitch -eq 710) 'Independent PrintArea pitch'
+    $content = Get-Geometry -Profile Letter -Mode PrintArea -GuideHeight 725.72 -PageAdvance 689.33
+    Assert-Test ($content.GuideHeight -eq 725.72 -and $content.PageAdvance -eq 689.33) 'Guide height and page advance coexist independently'
+    Assert-Test ([Math]::Abs($content.Overlap-36.39) -lt .0001 -and (Format-Point $content.Overlap) -ceq '36.39') 'Overlap computes as 36.39 points'
+    Assert-Test ($content.OverlapRounded -eq 36.4) 'Overlap has the requested 36.40 display rounding'
+    $scaled = Get-Geometry -Profile Letter -Mode Paper -GuideWidth 306 -GuideHeight 396 -OriginX 10 -OriginY 20
+    Assert-Test ($scaled.CalibrationScaleX -eq .5 -and $scaled.GuideInsetLeft -eq 36 -and $scaled.GuideInsetTop -eq 18 -and $scaled.CalibrationTranslateX -eq 10) 'Margins use explicit calibration scale and translation'
     $failed=$false
-    try { [void](Get-Geometry -PaperOrientation Portrait -Mode Paper -Left 1 -Right 1 -Top .5 -Bottom .5 -Pitch 720) } catch { $failed=$true }
-    Assert-Test $failed 'Reject overlapping physical-paper frames'
+    try { [void](Get-Geometry -GuideHeight 700 -PageAdvance 701) } catch { $failed=$true }
+    Assert-Test $failed 'Negative overlap rejected'
     $failed=$false
     try { [void](Get-Geometry -PaperOrientation Landscape -Top 4.5 -Bottom 4.5) } catch { $failed=$true }
     Assert-Test $failed 'Reject unusable margins'
@@ -1245,10 +1322,10 @@ function Invoke-SelfTest {
     $roundtrip = Read-SafeXml $payload.OuterXml
     $images = @(Get-GuideImages $roundtrip $batch)
     Assert-Test ($images.Count -eq 2) 'Payload XML round-trip and batch metadata'
-    Assert-Test ((Get-ImageDescriptor $images[1]).Y -eq 812) 'Second standard-Letter guide uses origin plus pitch'
+    Assert-Test ((Get-ImageDescriptor $images[1]).Y -eq 812) 'Second standard-Letter guide uses origin plus page advance'
     $marker = (Get-ImageDescriptor $images[0]).Marker
-    Assert-Test ($marker.Contains(';profile=Letter;') -and $marker.Contains(';width=612;') -and
-        $marker.Contains(';height=792;')) 'New metadata includes profile and effective dimensions'
+    Assert-Test ($marker.Contains(';profile=Letter;') -and $marker.Contains(';guideWidth=612;') -and
+        $marker.Contains(';guideHeight=792;') -and $marker.Contains(';overlap=0;')) 'New metadata includes profile and effective dimensions'
     $ordinary = Add-XmlChild $roundtrip.DocumentElement 'Image' @{alt='OneNotePageGuidesV2 v2;not-a-guide'}
     Assert-Test (@(Get-GuideImages $roundtrip).Count -eq 2) 'Ordinary images ignored by removal selector'
     $nested = Add-XmlChild $roundtrip.DocumentElement 'Outline'
@@ -1425,14 +1502,15 @@ try {
     if ($Action -eq 'Remove' -and $existing.Count -eq 0) { Write-Host 'No V2 guide images found. Nothing changed.'; return }
     $batch = ''
     $payload = $null
+    $geometry = $null
     if ($Action -in @('Add','Refresh')) {
         $geometry = Get-Geometry
         $png = New-GuidePng $geometry -WithoutMargins:$HideMargins
         $batch = [guid]::NewGuid().ToString('N')
         $payload = New-GuidePayload -Id $pinnedId -Geometry $geometry -Png $png -Batch $batch
         Assert-GuidePayload $payload $pinnedId
-        Write-Host ('Plan: {0} {1} frames; profile {2}; size {3} x {4} pt; pitch {5} pt; origin {6}, {7} pt.' -f `
-            $Pages,$GuideMode,$geometry.Profile,$geometry.FrameWidth,$geometry.FrameHeight,$geometry.Pitch,$StartX,$StartY)
+        Write-Host ('Plan: {0} {1} guides; profile {2}; size {3} x {4} pt; advance {5} pt; overlap {6} pt; origin {7}, {8} pt.' -f `
+            $Pages,$GuideMode,$geometry.Profile,$geometry.GuideWidth,$geometry.GuideHeight,$geometry.PageAdvance,$geometry.Overlap,$geometry.OriginX,$geometry.OriginY)
         Write-Warning 'These are uncalibrated visual guides, not native print boundaries. Remove before export/printing.'
     }
     [void](Get-PageTimestamp $page)
@@ -1444,7 +1522,7 @@ try {
     Assert-UnchangedGuideSet $app $pinnedId $snapshots
     $newXml = ''
     if ($null -ne $payload) { $newXml = $payload.OuterXml }
-    Start-Journal -Operation $Action -Target $target -Before $snapshots -Batch $batch -NewPayloadXml $newXml
+    Start-Journal -Operation $Action -Target $target -Before $snapshots -Batch $batch -NewPayloadXml $newXml -Geometry $geometry
     if ($Action -in @('Add','Refresh')) {
         $script:Journal.State = 'StagingNewGuides'; Save-Journal
         Invoke-PageUpdate $app $pinnedId $payload
