@@ -4,67 +4,19 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $scriptPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'OneNote-PageGuides.ps1'
-$tokens = $null
-$errors = $null
-[void][Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
-if (@($errors).Count -gt 0) {
-    $errors | ForEach-Object { Write-Error $_.Message }
-    exit 1
-}
+$tokens = $null; $errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($scriptPath,[ref]$tokens,[ref]$errors)
+if (@($errors).Count) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
 
-$source = Get-Content -LiteralPath $scriptPath -Raw
-$required = @(
-    "[string]`$Action = 'Status'",
-    "'Configure'",
-    '[CmdletBinding(SupportsShouldProcess = $true',
-    'function Import-UserSettings',
-    'function Save-UserSettings',
-    "`$script:SettingsPath",
-    'schemaVersion = 4',
-    "[ValidateSet('OutputSheet','Guide')]",
-    "[ValidateSet('Unverified','Verified')]",
-    'function Get-RefreshShortcutArguments',
-    'Ordinary installed Refresh arguments follow changed saved mode/origin without frozen geometry',
-    "[ValidateSet('OneNotePdfLetter','Letter','Custom')]",
-    "[string]`$PageSizeProfile = 'OneNotePdfLetter'",
-    '[double]$PageWidthPoints = 611.40',
-    '[double]$PageHeightPoints = 792.84',
-    '[double]$GuideWidthPoints = 0.0',
-    '[double]$GuideHeightPoints = 0.0',
-    '[double]$PageAdvancePoints = 0.0',
-    '[double]$OriginXPoints = 0.0',
-    '[double]$OriginYPoints = 0.0',
-    '# Migration alias only. It supplies PageAdvancePoints, never guide height.',
-    '$PageAdvancePoints = $PagePitchPoints',
-    'PhysicalSheetWidth=$physicalW; PhysicalSheetHeight=$physicalH',
-    'PrintableWidth=$printableW; PrintableHeight=$printableH',
-    'GuideWidth=$GuideWidth; GuideHeight=$GuideHeight; PageAdvance=$PageAdvance',
-    '$overlap=$GuideHeight-$PageAdvance',
-    'Get-Geometry -Profile Letter -Mode PrintArea -GuideHeight 725.72 -PageAdvance 689.33',
-    'Legacy PagePitchPoints migrates only to page advance',
-    'Overlap has the requested 36.40 display rounding',
-    'OutputMarginLeft=$outputLeft; OutputMarginRight=$outputRight',
-    'GuideInsetLeft=$outputLeft*$insetScaleX; GuideInsetRight=$outputRight*$insetScaleX',
-    'profile={5};physicalWidth={6};physicalHeight={7};guideWidth={8};guideHeight={9};overlap={10};originX={11};originY={12};',
-    'function Configure-Settings',
-    "Write-Host 'Margin examples:'",
-    "Write-Host '  Default: left/right 1 inch; top/bottom 0.5 inch.'",
-    "Write-Host '  Narrow: 0.5 inch on every side.'",
-    "`$OneNote.UpdatePageContent(`$Payload.OuterXml,`$stamp,2,`$false)"
-)
-foreach ($text in $required) {
-    if (-not $source.Contains($text)) { throw "Required source assertion missing: $text" }
+# Keep only structural/safety checks here. Geometry, migration, precedence and
+# shortcut contracts are exercised through the real helpers below.
+$functions = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] },$true).Name)
+foreach ($name in @('Get-Geometry','Import-UserSettings','Get-RefreshShortcutArguments','Assert-GuidePayload')) {
+    if ($functions -notcontains $name) { throw "Required function missing: $name" }
 }
-
-# Guard the new contract rather than requiring the removed overloaded model.
-$removed = @(
-    '$Geometry.FrameWidth',
-    '$Geometry.FrameHeight',
-    '$Geometry.Pitch',
-    'if ($Mode -eq ''PrintArea'') { $frameH = $Pitch }'
-)
-foreach ($text in $removed) {
-    if ($source.Contains($text)) { throw "Removed geometry contract unexpectedly restored: $text" }
-}
-
-Write-Host 'PASS: PowerShell parser and static safety/configuration assertions.'
+$updateCalls = @($ast.FindAll({ param($node)
+    $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Member.Value -eq 'UpdatePageContent'
+},$true))
+if ($updateCalls.Count -eq 0) { throw 'No OneNote UpdatePageContent call found.' }
+& (Join-Path $PSScriptRoot 'geometry-helper-tests.ps1')
+Write-Host 'PASS: parser, structural safety, and behavior-oriented helper tests.'
