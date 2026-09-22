@@ -54,6 +54,17 @@ Do not continue if the self-test reports a failure.
 .\OneNote-PageGuides.ps1 -Action Install -ShortcutPages 10 -CreateDesktopShortcuts
 ```
 
+The ordinary **Refresh** shortcut stores only operational options (`-Action
+Refresh -Pages ...`) and reads geometry from `settings.json` each time it runs.
+Use `-CreateOverrideShortcut` during installation only when you intentionally
+want an additional, clearly named shortcut with frozen calibrated geometry.
+
+Settings schema 4 stores guide mode, first-page origin, guide size and advance,
+calibration scale/translation, calibration verification status, and whether
+margins are interpreted in output-sheet or guide coordinates. Schema 1 and 2
+files retain their existing page sizes and margins during migration and are
+marked `Unverified` until their origin/calibration has been measured.
+
 Installation copies the utility to
 `%LOCALAPPDATA%\OneNotePageGuides\OneNote-PageGuides-V2.ps1`. It creates Start
 Menu shortcuts for Refresh, Remove, Configure, Status, and Self-Test;

@@ -1,7 +1,7 @@
 ﻿#requires -Version 5.1
 <#
 .SYNOPSIS
-    OneNote Page Guides 2.6.0 - removable visual guides, not native print boundaries.
+    OneNote Page Guides 2.7.0 - removable visual guides, not native print boundaries.
 .DESCRIPTION
     Windows desktop OneNote only. No add-in, subscription, or administrator rights.
     Status is the read-only default. A page is selected ONCE via the notebook
@@ -37,7 +37,7 @@
 .EXAMPLE
     .\OneNote-PageGuides.ps1 -Action Recover -RecoveryFile 'C:\path\transaction.json'
 .NOTES
-    Version: 2.6.0
+    Version: 2.7.0
     Adds persistent page-size profiles, custom geometry, pitch, and margins.
     Explicit parameters always override saved values for the current invocation.
     Sources: Microsoft OneNote desktop Application interface / Enumerations;
@@ -64,6 +64,12 @@ param(
     [ValidateRange(0.0,10000.0)][double]$GuideWidthPoints = 0.0,
     [ValidateRange(0.0,10000.0)][double]$GuideHeightPoints = 0.0,
     [ValidateRange(0.0,10000.0)][double]$PageAdvancePoints = 0.0,
+    [ValidateRange(0.000001,1000.0)][double]$CalibrationScaleX = 1.0,
+    [ValidateRange(0.000001,1000.0)][double]$CalibrationScaleY = 1.0,
+    [ValidateRange(-900000.0,900000.0)][double]$CalibrationTranslateX = 0.0,
+    [ValidateRange(-900000.0,900000.0)][double]$CalibrationTranslateY = 0.0,
+    [ValidateSet('OutputSheet','Guide')][string]$MarginSemantics = 'OutputSheet',
+    [ValidateSet('Unverified','Verified')][string]$CalibrationStatus = 'Unverified',
     # Migration alias only. It supplies PageAdvancePoints, never guide height.
     [ValidateRange(0.0,10000.0)][double]$PagePitchPoints = 0.0,
     [Alias('StartX')][ValidateRange(0.0,900000.0)][double]$LegacyOriginXPoints = 0.0,
@@ -75,12 +81,13 @@ param(
     [string]$RecoveryFile = '',
     [ValidateRange(1,100)][int]$ShortcutPages = 10,
     [switch]$CreateDesktopShortcuts,
+    [switch]$CreateOverrideShortcut,
     [switch]$ResetSettings
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$script:Version = '2.6.0'
+$script:Version = '2.7.0'
 $script:OneNamespace = 'http://schemas.microsoft.com/office/onenote/2013/onenote'
 $script:MetaName = 'OneNotePageGuidesV2'
 $script:RecoveryMetaName = 'OneNotePageGuidesRecovery'
@@ -95,13 +102,21 @@ $script:Journal = $null
 $script:InvocationParameters = @($PSBoundParameters.Keys)
 $script:PageWidthAvailable = $script:InvocationParameters -contains 'PageWidthPoints'
 $script:PageHeightAvailable = $script:InvocationParameters -contains 'PageHeightPoints'
+$script:SettingsSchema = 0
+$script:ValueSources = @{}
+foreach ($name in @('Orientation','GuideMode','PageSizeProfile','PageWidthPoints','PageHeightPoints','MarginLeft','MarginRight','MarginTop','MarginBottom',
+    'OriginXPoints','OriginYPoints','GuideWidthPoints','GuideHeightPoints','PageAdvancePoints','CalibrationScaleX','CalibrationScaleY',
+    'CalibrationTranslateX','CalibrationTranslateY','MarginSemantics','CalibrationStatus')) {
+    $script:ValueSources[$name] = if ($script:InvocationParameters -contains $name) { 'explicit argument' } else { 'built-in default' }
+}
 
 if ($script:InvocationParameters -contains 'PagePitchPoints') {
     if ($script:InvocationParameters -contains 'PageAdvancePoints') { throw 'Specify PageAdvancePoints or the legacy PagePitchPoints alias, not both.' }
     $PageAdvancePoints = $PagePitchPoints
+    $script:ValueSources['PageAdvancePoints'] = 'explicit argument'
 }
-if ($script:InvocationParameters -contains 'LegacyOriginXPoints') { $OriginXPoints = $LegacyOriginXPoints }
-if ($script:InvocationParameters -contains 'LegacyOriginYPoints') { $OriginYPoints = $LegacyOriginYPoints }
+if ($script:InvocationParameters -contains 'LegacyOriginXPoints') { $OriginXPoints = $LegacyOriginXPoints; $script:ValueSources['OriginXPoints']='explicit argument' }
+if ($script:InvocationParameters -contains 'LegacyOriginYPoints') { $OriginYPoints = $LegacyOriginYPoints; $script:ValueSources['OriginYPoints']='explicit argument' }
 
 function Assert-Windows {
     if ($env:OS -ne 'Windows_NT') {
@@ -129,7 +144,8 @@ function Import-UserSettings {
         $settings = Get-Content -LiteralPath $script:SettingsPath -Raw | ConvertFrom-Json
         $schema = 1
         if ($null -ne $settings.PSObject.Properties['schemaVersion']) { $schema = [int]$settings.schemaVersion }
-        if ($schema -lt 1 -or $schema -gt 3) { throw "Unsupported settings schema version $schema." }
+        if ($schema -lt 1 -or $schema -gt 4) { throw "Unsupported settings schema version $schema." }
+        $script:SettingsSchema = $schema
         foreach ($name in @('MarginLeft','MarginRight','MarginTop','MarginBottom')) {
             if ($script:InvocationParameters -contains $name) { continue }
             $property = $settings.PSObject.Properties[$name]
@@ -139,12 +155,14 @@ function Import-UserSettings {
                 throw "Saved $name must be between 0 and 4 inches."
             }
             Set-Variable -Name $name -Value $value -Scope Script
+            $script:ValueSources[$name] = if ($schema -lt 3) { 'migrated legacy value' } else { 'saved setting' }
         }
         if ($script:InvocationParameters -notcontains 'PageSizeProfile' -and
             $null -ne $settings.PSObject.Properties['PageSizeProfile']) {
             $savedProfile = [string]$settings.PageSizeProfile
             if ($savedProfile -notin @('OneNotePdfLetter','Letter','Custom')) { throw 'Saved PageSizeProfile is invalid.' }
             $script:PageSizeProfile = $savedProfile
+            $script:ValueSources['PageSizeProfile'] = if ($schema -lt 3) { 'migrated legacy value' } else { 'saved setting' }
         }
         foreach ($name in @('PageWidthPoints','PageHeightPoints')) {
             $property = $settings.PSObject.Properties[$name]
@@ -154,6 +172,7 @@ function Import-UserSettings {
                     throw "Saved $name must be between 10 and 10000 points."
                 }
                 Set-Variable -Name $name -Value $value -Scope Script
+                $script:ValueSources[$name] = if ($schema -lt 3) { 'migrated legacy value' } else { 'saved setting' }
                 Set-Variable -Name ($name.Replace('Points','Available')) -Value $true -Scope Script
             }
         }
@@ -168,6 +187,7 @@ function Import-UserSettings {
                 throw "Saved $name must be 0 through $maximum points."
             }
             Set-Variable -Name $name -Value $value -Scope Script
+            $script:ValueSources[$name] = if ($schema -lt 3) { 'migrated legacy value' } else { 'saved setting' }
         }
         # Schema 1/2 migration: pitch maps only to advance. It must never resize a guide.
         if ($script:InvocationParameters -notcontains 'PageAdvancePoints' -and
@@ -178,6 +198,39 @@ function Import-UserSettings {
                 throw 'Saved PagePitchPoints must be 0 through 10000 points.'
             }
             $script:PageAdvancePoints=$value
+            $script:ValueSources['PageAdvancePoints']='migrated legacy value'
+        }
+        foreach ($definition in @(
+            @('GuideMode',@('Paper','PrintArea')),
+            @('MarginSemantics',@('OutputSheet','Guide')),
+            @('CalibrationStatus',@('Unverified','Verified')))) {
+            $name=$definition[0]
+            if ($script:InvocationParameters -contains $name) { continue }
+            $property=$settings.PSObject.Properties[$name]
+            if ($null -ne $property) {
+                $value=[string]$property.Value
+                if ($value -notin $definition[1]) { throw "Saved $name is invalid." }
+                Set-Variable -Name $name -Value $value -Scope Script
+                $script:ValueSources[$name]=if ($schema -lt 3) { 'migrated legacy value' } else { 'saved setting' }
+            }
+        }
+        foreach ($name in @('CalibrationScaleX','CalibrationScaleY','CalibrationTranslateX','CalibrationTranslateY')) {
+            if ($script:InvocationParameters -contains $name) { continue }
+            $property=$settings.PSObject.Properties[$name]
+            if ($null -eq $property) { continue }
+            $value=[double]$property.Value
+            $translation=$name -like 'CalibrationTranslate*'
+            if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or
+                ($translation -and [Math]::Abs($value) -gt 900000) -or (-not $translation -and ($value -le 0 -or $value -gt 1000))) {
+                throw "Saved $name is outside its valid range."
+            }
+            Set-Variable -Name $name -Value $value -Scope Script
+            $script:ValueSources[$name]=if ($schema -lt 3) { 'migrated legacy value' } else { 'saved setting' }
+        }
+        # Legacy files did not establish a measured origin/calibration. Keep their
+        # exact page and margin values, but label the missing evidence honestly.
+        if ($schema -lt 3 -and $script:InvocationParameters -notcontains 'CalibrationStatus') {
+            $script:CalibrationStatus='Unverified'; $script:ValueSources['CalibrationStatus']='migrated legacy value'
         }
     }
     catch {
@@ -188,7 +241,8 @@ function Import-UserSettings {
 function Save-UserSettings {
     [void][IO.Directory]::CreateDirectory($script:InstallDirectory)
     $settings = [ordered]@{
-        schemaVersion = 3
+        schemaVersion = 4
+        GuideMode = $GuideMode
         PageSizeProfile = $PageSizeProfile
         PageWidthPoints = $PageWidthPoints
         PageHeightPoints = $PageHeightPoints
@@ -197,6 +251,12 @@ function Save-UserSettings {
         PageAdvancePoints = $PageAdvancePoints
         OriginXPoints = $OriginXPoints
         OriginYPoints = $OriginYPoints
+        CalibrationScaleX = $CalibrationScaleX
+        CalibrationScaleY = $CalibrationScaleY
+        CalibrationTranslateX = $CalibrationTranslateX
+        CalibrationTranslateY = $CalibrationTranslateY
+        CalibrationStatus = $CalibrationStatus
+        MarginSemantics = $MarginSemantics
         MarginLeft = $MarginLeft
         MarginRight = $MarginRight
         MarginTop = $MarginTop
@@ -235,6 +295,18 @@ function Read-GeometrySetting {
     return $value
 }
 
+function Read-NumberSetting {
+    param([string]$Name,[double]$Current,[double]$Minimum,[double]$Maximum)
+    $answer=Read-Host ("{0} ({1} to {2}) [{3}]" -f $Name,$Minimum,$Maximum,(Format-Point $Current))
+    if ([string]::IsNullOrWhiteSpace($answer)) { return $Current }
+    $value=0.0
+    if (-not [double]::TryParse($answer,[Globalization.NumberStyles]::Float,[Globalization.CultureInfo]::InvariantCulture,[ref]$value) -or
+        [double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -lt $Minimum -or $value -gt $Maximum) {
+        throw "Invalid $Name '$answer'."
+    }
+    return $value
+}
+
 function Configure-Settings {
     if ($ResetSettings) {
         if (Test-Path -LiteralPath $script:SettingsPath -PathType Leaf) {
@@ -244,9 +316,15 @@ function Configure-Settings {
         return
     }
     $explicit = @('MarginLeft','MarginRight','MarginTop','MarginBottom','PageSizeProfile',
-        'PageWidthPoints','PageHeightPoints','GuideWidthPoints','GuideHeightPoints','PageAdvancePoints','OriginXPoints','OriginYPoints') |
+        'PageWidthPoints','PageHeightPoints','GuideWidthPoints','GuideHeightPoints','PageAdvancePoints','OriginXPoints','OriginYPoints',
+        'GuideMode','CalibrationScaleX','CalibrationScaleY','CalibrationTranslateX','CalibrationTranslateY','MarginSemantics','CalibrationStatus') |
         Where-Object { $script:InvocationParameters -contains $_ }
     if (@($explicit).Count -eq 0) {
+        $answer=Read-Host "Guide mode: Paper or PrintArea [$GuideMode]"
+        if (-not [string]::IsNullOrWhiteSpace($answer)) {
+            $match=@('Paper','PrintArea') | Where-Object { $_ -ieq $answer }
+            if (@($match).Count -ne 1) { throw "Invalid guide mode '$answer'." }; $script:GuideMode=$match[0]
+        }
         Write-Host "Current page-size profile: $PageSizeProfile"
         $answer = Read-Host 'Page profile: OneNotePdfLetter, Letter, or Custom (Enter keeps current)'
         if (-not [string]::IsNullOrWhiteSpace($answer)) {
@@ -262,6 +340,22 @@ function Configure-Settings {
         $script:GuideWidthPoints = Read-GeometrySetting 'Guide width' $GuideWidthPoints -AllowAutomatic
         $script:GuideHeightPoints = Read-GeometrySetting 'Guide height' $GuideHeightPoints -AllowAutomatic
         $script:PageAdvancePoints = Read-GeometrySetting 'Page advance' $PageAdvancePoints -AllowAutomatic
+        $script:OriginXPoints = Read-NumberSetting 'First-page origin X in points' $OriginXPoints 0 900000
+        $script:OriginYPoints = Read-NumberSetting 'First-page origin Y in points' $OriginYPoints 0 900000
+        $script:CalibrationScaleX = Read-NumberSetting 'Calibration scale X' $CalibrationScaleX 0.000001 1000
+        $script:CalibrationScaleY = Read-NumberSetting 'Calibration scale Y' $CalibrationScaleY 0.000001 1000
+        $script:CalibrationTranslateX = Read-NumberSetting 'Calibration translation X in points' $CalibrationTranslateX -900000 900000
+        $script:CalibrationTranslateY = Read-NumberSetting 'Calibration translation Y in points' $CalibrationTranslateY -900000 900000
+        $answer=Read-Host "Margin semantics: OutputSheet or Guide [$MarginSemantics]"
+        if (-not [string]::IsNullOrWhiteSpace($answer)) {
+            $match=@('OutputSheet','Guide') | Where-Object { $_ -ieq $answer }
+            if (@($match).Count -ne 1) { throw "Invalid margin semantics '$answer'." }; $script:MarginSemantics=$match[0]
+        }
+        $answer=Read-Host "Calibration status: Unverified or Verified [$CalibrationStatus]"
+        if (-not [string]::IsNullOrWhiteSpace($answer)) {
+            $match=@('Unverified','Verified') | Where-Object { $_ -ieq $answer }
+            if (@($match).Count -ne 1) { throw "Invalid calibration status '$answer'." }; $script:CalibrationStatus=$match[0]
+        }
         Write-Host 'Margin examples:'
         Write-Host '  Default: left/right 1 inch; top/bottom 0.5 inch.'
         Write-Host '  Narrow: 0.5 inch on every side.'
@@ -452,7 +546,7 @@ function Select-TargetPage {
         $gridFailed = $false
         $picked = @()
         try {
-            $picked = @($ordered | Out-GridView -Title 'OneNote Page Guides 2.6.0 - choose ONE target page' -OutputMode Single)
+            $picked = @($ordered | Out-GridView -Title 'OneNote Page Guides 2.7.0 - choose ONE target page' -OutputMode Single)
         }
         catch {
             $gridFailed = $true
@@ -582,14 +676,22 @@ function Get-Geometry {
           [double]$GuideHeight = $GuideHeightPoints,
           [double]$PageAdvance = $PageAdvancePoints,
           [double]$OriginX = $OriginXPoints, [double]$OriginY = $OriginYPoints,
+          [double]$ScaleX = $CalibrationScaleX, [double]$ScaleY = $CalibrationScaleY,
+          [double]$TranslateX = $CalibrationTranslateX, [double]$TranslateY = $CalibrationTranslateY,
+          [string]$MarginMode = $MarginSemantics,
           [string]$Profile = $PageSizeProfile,
           [double]$CustomWidth = $PageWidthPoints,
           [double]$CustomHeight = $PageHeightPoints,
           [switch]$CustomDimensionsAvailable)
-    foreach ($value in @($Left,$Right,$Top,$Bottom,$GuideWidth,$GuideHeight,$PageAdvance,$OriginX,$OriginY,$CustomWidth,$CustomHeight)) {
+    foreach ($value in @($Left,$Right,$Top,$Bottom,$GuideWidth,$GuideHeight,$PageAdvance,$OriginX,$OriginY,$CustomWidth,$CustomHeight,$ScaleX,$ScaleY)) {
         if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -lt 0) {
             throw 'Geometry must use finite, nonnegative numbers.'
         }
+    }
+    if ($ScaleX -le 0 -or $ScaleX -gt 1000 -or $ScaleY -le 0 -or $ScaleY -gt 1000 -or
+        [double]::IsNaN($TranslateX) -or [double]::IsInfinity($TranslateX) -or [Math]::Abs($TranslateX) -gt 900000 -or
+        [double]::IsNaN($TranslateY) -or [double]::IsInfinity($TranslateY) -or [Math]::Abs($TranslateY) -gt 900000) {
+        throw 'Calibration scale/translation is outside its valid range.'
     }
     switch ($Profile) {
         'OneNotePdfLetter' { $portraitW = 611.40; $portraitH = 792.84 }
@@ -612,8 +714,14 @@ function Get-Geometry {
     $printableW=$physicalW-$outputLeft-$outputRight
     $printableH=$physicalH-$outputTop-$outputBottom
     if ($printableW -le 0 -or $printableH -le 0) { throw 'Margins leave no usable printable area.' }
-    if ($GuideWidth -eq 0) { $GuideWidth = if ($Mode -eq 'Paper') { $physicalW } else { $printableW } }
-    if ($GuideHeight -eq 0) { $GuideHeight = if ($Mode -eq 'Paper') { $physicalH } else { $printableH } }
+    if ($GuideWidth -eq 0) {
+        $automaticWidth=if ($Mode -eq 'Paper') { $physicalW } else { $printableW }
+        $GuideWidth=$automaticWidth*$ScaleX
+    }
+    if ($GuideHeight -eq 0) {
+        $automaticHeight=if ($Mode -eq 'Paper') { $physicalH } else { $printableH }
+        $GuideHeight=$automaticHeight*$ScaleY
+    }
     if ($PageAdvance -eq 0) { $PageAdvance = $GuideHeight }
     foreach ($item in @(@('Guide width',$GuideWidth),@('Guide height',$GuideHeight),@('Page advance',$PageAdvance))) {
         if ($item[1] -lt 10 -or $item[1] -gt 10000) { throw "$($item[0]) must be 10 to 10000 points, or 0 for automatic." }
@@ -621,19 +729,24 @@ function Get-Geometry {
     $overlap=$GuideHeight-$PageAdvance
     if ($overlap -lt 0) { throw 'Page advance cannot exceed guide height; negative overlap would leave an unrepresented gap.' }
     # Calibrate output-sheet coordinates into the independently sized OneNote guide.
-    $scaleX=$GuideWidth/$physicalW; $scaleY=$GuideHeight/$physicalH
+    $effectiveScaleX=$GuideWidth/$physicalW; $effectiveScaleY=$GuideHeight/$physicalH
+    $effectiveOriginX=$OriginX+$TranslateX; $effectiveOriginY=$OriginY+$TranslateY
+    if ($effectiveOriginX -lt 0 -or $effectiveOriginY -lt 0) { throw 'Calibration translation places the effective origin before zero.' }
+    $insetScaleX=if ($MarginMode -eq 'OutputSheet') { $effectiveScaleX } elseif ($MarginMode -eq 'Guide') { 1.0 } else { throw "Unknown margin semantics '$MarginMode'." }
+    $insetScaleY=if ($MarginMode -eq 'OutputSheet') { $effectiveScaleY } else { 1.0 }
     [pscustomobject]@{
         Profile=$Profile; Orientation=$PaperOrientation; Mode=$Mode
         PhysicalSheetWidth=$physicalW; PhysicalSheetHeight=$physicalH
         PrintableWidth=$printableW; PrintableHeight=$printableH
         GuideWidth=$GuideWidth; GuideHeight=$GuideHeight; PageAdvance=$PageAdvance
-        OriginX=$OriginX; OriginY=$OriginY; Overlap=$overlap; OverlapRounded=[Math]::Round($overlap,1)
-        CalibrationScaleX=$scaleX; CalibrationScaleY=$scaleY
-        CalibrationTranslateX=$OriginX; CalibrationTranslateY=$OriginY
+        OriginX=$effectiveOriginX; OriginY=$effectiveOriginY; ConfiguredOriginX=$OriginX; ConfiguredOriginY=$OriginY; Overlap=$overlap; OverlapRounded=[Math]::Round($overlap,1)
+        CalibrationScaleX=$ScaleX; CalibrationScaleY=$ScaleY
+        EffectiveScaleX=$effectiveScaleX; EffectiveScaleY=$effectiveScaleY
+        CalibrationTranslateX=$TranslateX; CalibrationTranslateY=$TranslateY; MarginSemantics=$MarginMode; CalibrationStatus=$CalibrationStatus
         OutputMarginLeft=$outputLeft; OutputMarginRight=$outputRight
         OutputMarginTop=$outputTop; OutputMarginBottom=$outputBottom
-        GuideInsetLeft=$outputLeft*$scaleX; GuideInsetRight=$outputRight*$scaleX
-        GuideInsetTop=$outputTop*$scaleY; GuideInsetBottom=$outputBottom*$scaleY
+        GuideInsetLeft=$outputLeft*$insetScaleX; GuideInsetRight=$outputRight*$insetScaleX
+        GuideInsetTop=$outputTop*$insetScaleY; GuideInsetBottom=$outputBottom*$insetScaleY
     }
 }
 
@@ -968,6 +1081,16 @@ function Show-GuideStatus {
     param($Page,$Target)
     Write-TargetSummary $Target
     $geometry = Get-Geometry
+    Write-Host "Settings schema: $(if ($script:SettingsSchema -eq 0) { 'none' } else { $script:SettingsSchema })"
+    foreach ($item in @(
+        @('Orientation',$Orientation),@('GuideMode',$GuideMode),@('PageSizeProfile',$PageSizeProfile),@('PageWidthPoints',$PageWidthPoints),@('PageHeightPoints',$PageHeightPoints),
+        @('OriginXPoints',$geometry.OriginX),@('OriginYPoints',$geometry.OriginY),@('GuideWidthPoints',$geometry.GuideWidth),@('GuideHeightPoints',$geometry.GuideHeight),
+        @('PageAdvancePoints',$geometry.PageAdvance),@('CalibrationScaleX',$CalibrationScaleX),@('CalibrationScaleY',$CalibrationScaleY),
+        @('CalibrationTranslateX',$CalibrationTranslateX),@('CalibrationTranslateY',$CalibrationTranslateY),@('MarginSemantics',$MarginSemantics),
+        @('CalibrationStatus',$CalibrationStatus),@('MarginLeft',$MarginLeft),@('MarginRight',$MarginRight),@('MarginTop',$MarginTop),@('MarginBottom',$MarginBottom))) {
+        Write-Host ("Effective {0}: {1} (source: {2})" -f $item[0],$item[1],$script:ValueSources[$item[0]])
+    }
+    Write-InstalledShortcutStatus
     $advanceKind = if ($PageAdvancePoints -eq 0) { 'automatic' } else { 'explicit' }
     Write-Host ("Geometry: profile {0}; {1}; physical {2} x {3} pt; printable {4} x {5} pt." -f `
         $geometry.Profile,$geometry.Orientation,(Format-Point $geometry.PhysicalSheetWidth),
@@ -1123,6 +1246,27 @@ function New-UtilityShortcut {
     finally { Release-ComObjectSafe $link; Release-ComObjectSafe $shell }
 }
 
+function Write-InstalledShortcutStatus {
+    if (-not (Test-Path -LiteralPath $script:StartMenuDirectory -PathType Container)) { Write-Host 'Installed shortcut arguments: none'; return }
+    $shell=$null
+    try {
+        $shell=New-Object -ComObject WScript.Shell
+        foreach ($path in @(Get-ChildItem -LiteralPath $script:StartMenuDirectory -Filter '*.lnk' -File)) {
+            $link=$null
+            try { $link=$shell.CreateShortcut($path.FullName); Write-Host ("Installed shortcut arguments [{0}]: {1}" -f $path.Name,$link.Arguments) }
+            finally { Release-ComObjectSafe $link }
+        }
+    }
+    finally { Release-ComObjectSafe $shell }
+}
+
+function Get-RefreshShortcutArguments {
+    param([string]$Base,[int]$Count,[switch]$UseConsolePicker)
+    $arguments=$Base + (' -Action Refresh -Pages {0}' -f $Count)
+    if ($UseConsolePicker) { $arguments += ' -ConsolePicker' }
+    return $arguments
+}
+
 function Install-Utility {
     if ([string]::IsNullOrWhiteSpace($script:RunningFile) -or -not (Test-Path -LiteralPath $script:RunningFile -PathType Leaf)) {
         throw 'Run this from the saved OneNote-PageGuides.ps1 file.'
@@ -1142,12 +1286,9 @@ function Install-Utility {
     try { Unblock-File -LiteralPath $destination -Confirm:$false -ErrorAction Stop } catch { Write-Verbose $_.Exception.Message }
     [void][IO.Directory]::CreateDirectory($script:StartMenuDirectory)
     $base = '-NoProfile -STA -NoExit -ExecutionPolicy Bypass -File "' + $destination + '"'
-    $refresh = $base + (' -Action Refresh -Pages {0} -Orientation {1} -GuideMode {2}' -f $ShortcutPages,$Orientation,$GuideMode)
-    foreach ($pair in @(@('StartX',$StartX),@('StartY',$StartY))) {
-        $refresh += ' -' + $pair[0] + ' ' + (Format-Point ([double]$pair[1]))
-    }
-    if ($HideMargins) { $refresh += ' -HideMargins' }
-    if ($ConsolePicker) { $refresh += ' -ConsolePicker' }
+    # The ordinary shortcut deliberately resolves geometry from settings at run
+    # time, so reconfiguration also changes shortcuts that are already installed.
+    $refresh = Get-RefreshShortcutArguments $base $ShortcutPages -UseConsolePicker:$ConsolePicker
     $shortcuts = @(
         @('Refresh OneNote Page Guides.lnk',$refresh,'Choose a page and refresh visual guides using saved geometry'),
         @('Remove OneNote Page Guides.lnk',($base+' -Action Remove'),'Choose a page and remove guide images before printing'),
@@ -1155,6 +1296,11 @@ function Install-Utility {
         @('OneNote Page Guides Status.lnk',($base+' -Action Status'),'Read-only guide status'),
         @('OneNote Page Guides Self-Test.lnk',($base+' -Action SelfTest'),'Local self-tests without connecting to OneNote')
     )
+    if ($CreateOverrideShortcut) {
+        $override=$refresh + (' -Orientation {0} -GuideMode {1} -PageSizeProfile {2} -PageWidthPoints {3} -PageHeightPoints {4} -GuideWidthPoints {5} -GuideHeightPoints {6} -PageAdvancePoints {7} -OriginXPoints {8} -OriginYPoints {9} -CalibrationScaleX {10} -CalibrationScaleY {11} -CalibrationTranslateX {12} -CalibrationTranslateY {13} -MarginSemantics {14} -CalibrationStatus {15} -MarginLeft {16} -MarginRight {17} -MarginTop {18} -MarginBottom {19}' -f `
+            $Orientation,$GuideMode,$PageSizeProfile,(Format-Point $PageWidthPoints),(Format-Point $PageHeightPoints),(Format-Point $GuideWidthPoints),(Format-Point $GuideHeightPoints),(Format-Point $PageAdvancePoints),(Format-Point $OriginXPoints),(Format-Point $OriginYPoints),(Format-Point $CalibrationScaleX),(Format-Point $CalibrationScaleY),(Format-Point $CalibrationTranslateX),(Format-Point $CalibrationTranslateY),$MarginSemantics,$CalibrationStatus,(Format-Point $MarginLeft),(Format-Point $MarginRight),(Format-Point $MarginTop),(Format-Point $MarginBottom))
+        $shortcuts += ,@('Refresh OneNote Page Guides - Calibrated Override.lnk',$override,'Refresh using an explicit, intentionally frozen geometry override')
+    }
     foreach ($entry in $shortcuts) {
         New-UtilityShortcut (Join-Path $script:StartMenuDirectory $entry[0]) $entry[1] $entry[2]
     }
@@ -1165,14 +1311,15 @@ function Install-Utility {
             New-UtilityShortcut (Join-Path $desktop $entry[0]) $entry[1] $entry[2]
         }
     }
-    Write-Host 'OneNote Page Guides 2.6.0 installed. No OneNote content was changed.'
+    Write-Host 'OneNote Page Guides 2.7.0 installed. No OneNote content was changed.'
     Write-Host "Installed file: $destination"
     Write-Host 'Shortcuts keep the console open so errors are visible. Close it after use.'
 }
 
 function Uninstall-Utility {
     $names = @('Refresh OneNote Page Guides.lnk','Remove OneNote Page Guides.lnk',
-        'Configure OneNote Page Guide Margins.lnk','OneNote Page Guides Status.lnk','OneNote Page Guides Self-Test.lnk')
+        'Configure OneNote Page Guide Margins.lnk','OneNote Page Guides Status.lnk','OneNote Page Guides Self-Test.lnk',
+        'Refresh OneNote Page Guides - Calibrated Override.lnk')
     $locations = @($script:StartMenuDirectory,[Environment]::GetFolderPath('Desktop'))
     foreach ($folder in $locations) {
         foreach ($name in $names) {
@@ -1215,7 +1362,8 @@ function Invoke-SelfTest {
     $savedState = @{}
     foreach ($name in @('InstallDirectory','SettingsPath','InvocationParameters','PageSizeProfile',
         'PageWidthPoints','PageHeightPoints','PagePitchPoints','GuideWidthPoints','GuideHeightPoints','PageAdvancePoints','OriginXPoints','OriginYPoints','PageWidthAvailable','PageHeightAvailable',
-        'MarginLeft','MarginRight','MarginTop','MarginBottom','ResetSettings')) {
+        'MarginLeft','MarginRight','MarginTop','MarginBottom','GuideMode','CalibrationScaleX','CalibrationScaleY','CalibrationTranslateX','CalibrationTranslateY',
+        'MarginSemantics','CalibrationStatus','SettingsSchema','ValueSources','ResetSettings')) {
         $savedState[$name] = Get-Variable -Name $name -Scope Script -ValueOnly
     }
     $testDirectory = Join-Path ([IO.Path]::GetTempPath()) ('OneNotePageGuides-SelfTest-' + [guid]::NewGuid().ToString('N'))
@@ -1223,12 +1371,13 @@ function Invoke-SelfTest {
         [void][IO.Directory]::CreateDirectory($testDirectory)
         $script:InstallDirectory = $testDirectory
         $script:SettingsPath = Join-Path $testDirectory 'settings.json'
-        @{schemaVersion=1;MarginLeft=0.75;MarginRight=0.8;MarginTop=0.4;MarginBottom=0.45} |
+        @{schemaVersion=1;MarginLeft=0.75;MarginRight=0.8;MarginTop=0.4;MarginBottom=0.45;PageWidthPoints=600;PageHeightPoints=780} |
             ConvertTo-Json | Set-Content -LiteralPath $script:SettingsPath -Encoding UTF8
         $script:InvocationParameters = @()
         $script:PageSizeProfile = 'OneNotePdfLetter'; $script:MarginLeft = 1
         Import-UserSettings
-        Assert-Test ($PageSizeProfile -ceq 'OneNotePdfLetter' -and $MarginLeft -eq 0.75) 'Version-1 margin settings use the new calibrated default'
+        Assert-Test ($PageSizeProfile -ceq 'OneNotePdfLetter' -and $MarginLeft -eq 0.75 -and $PageWidthPoints -eq 600 -and
+            $PageHeightPoints -eq 780 -and $CalibrationStatus -ceq 'Unverified') 'Version-1 migration preserves sizes/margins and marks calibration unverified'
         $before = [IO.File]::ReadAllText($script:SettingsPath)
         $script:InvocationParameters = @('MarginLeft'); $script:MarginLeft = 0.25
         Import-UserSettings
@@ -1238,6 +1387,10 @@ function Invoke-SelfTest {
         $script:InvocationParameters=@(); $script:PageAdvancePoints=0; $script:GuideHeightPoints=725.72
         Import-UserSettings
         Assert-Test ($PageAdvancePoints -eq 689.33 -and $GuideHeightPoints -eq 725.72) 'Legacy PagePitchPoints migrates only to page advance'
+        $ordinary=Get-RefreshShortcutArguments 'powershell -File utility.ps1' 7
+        $script:GuideMode='PrintArea'; $script:OriginXPoints=123; $script:OriginYPoints=456
+        Assert-Test ((Get-RefreshShortcutArguments 'powershell -File utility.ps1' 7) -ceq $ordinary -and
+            $ordinary -notmatch 'GuideMode|Origin|StartX|StartY') 'Ordinary installed Refresh arguments follow changed saved mode/origin without frozen geometry'
         $script:ResetSettings = $true
         Configure-Settings
         Assert-Test (-not (Test-Path -LiteralPath $script:SettingsPath)) 'ResetSettings removes all saved configuration'
@@ -1266,8 +1419,9 @@ function Invoke-SelfTest {
     Assert-Test ($content.GuideHeight -eq 725.72 -and $content.PageAdvance -eq 689.33) 'Guide height and page advance coexist independently'
     Assert-Test ([Math]::Abs($content.Overlap-36.39) -lt .0001 -and (Format-Point $content.Overlap) -ceq '36.39') 'Overlap computes as 36.39 points'
     Assert-Test ($content.OverlapRounded -eq 36.4) 'Overlap has the requested 36.40 display rounding'
-    $scaled = Get-Geometry -Profile Letter -Mode Paper -GuideWidth 306 -GuideHeight 396 -OriginX 10 -OriginY 20
-    Assert-Test ($scaled.CalibrationScaleX -eq .5 -and $scaled.GuideInsetLeft -eq 36 -and $scaled.GuideInsetTop -eq 18 -and $scaled.CalibrationTranslateX -eq 10) 'Margins use explicit calibration scale and translation'
+    $scaled = Get-Geometry -Profile Letter -Mode Paper -GuideWidth 306 -GuideHeight 396 -OriginX 10 -OriginY 20 -TranslateX 3 -TranslateY 4
+    Assert-Test ($scaled.EffectiveScaleX -eq .5 -and $scaled.GuideInsetLeft -eq 36 -and $scaled.GuideInsetTop -eq 18 -and
+        $scaled.CalibrationTranslateX -eq 3 -and $scaled.OriginX -eq 13) 'Margins use explicit calibration scale and translation'
     $failed=$false
     try { [void](Get-Geometry -GuideHeight 700 -PageAdvance 701) } catch { $failed=$true }
     Assert-Test $failed 'Negative overlap rejected'
@@ -1465,7 +1619,7 @@ try {
     }
     if ($Action -eq 'Install') {
         [void](Get-Geometry) # validate shortcut geometry before changing installed files
-        if ($PSCmdlet.ShouldProcess($script:InstallDirectory,'Install V2.6.0 and replace utility shortcuts')) {
+        if ($PSCmdlet.ShouldProcess($script:InstallDirectory,'Install V2.7.0 and replace utility shortcuts')) {
             Save-UserSettings
             Install-Utility
         }
