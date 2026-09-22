@@ -16,5 +16,10 @@ Thanks for helping improve OneNote Page Guides.
    on a disposable page. Never use important notebook content for a first test.
 4. Document user-visible switches and safety implications in `README.md`.
 
+For export/pagination changes, follow `tests/integration/README.md`. Integration
+must use a copied page in the dedicated test notebook and temporary output.
+Publish measured verifier results and limitations in the PR; unit tests are
+never evidence that desktop OneNote exported correctly.
+
 Do not commit recovery journals: they can contain embedded page-guide image data
 and local notebook metadata.

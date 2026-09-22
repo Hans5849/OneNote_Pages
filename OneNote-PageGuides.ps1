@@ -1604,6 +1604,10 @@ function Invoke-SelfTest {
 # Entry point. All notebook mutations are behind one high-impact ShouldProcess gate.
 $app = $null
 $pageMutex = $null
+# Tests may load the helper functions without starting COM or touching user data.
+# This switch is intentionally process-scoped and undocumented as a user option.
+if ($env:ONENOTE_PAGE_GUIDES_LIBRARY_MODE -eq '1') { return }
+
 try {
     Assert-Windows
     Initialize-Paths

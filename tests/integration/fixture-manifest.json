@@ -1,0 +1,23 @@
+{
+  "formatVersion": 1,
+  "fixtureName": "OneNote Page Guides disposable boundary fixture",
+  "units": "points",
+  "pageCount": 3,
+  "mediaBox": [0, 0, 612, 792],
+  "margins": { "left": 72, "right": 72, "top": 36, "bottom": 36 },
+  "guide": { "originY": 0, "height": 725.72, "advance": 689.33 },
+  "marginMarks": {
+    "MARGIN-LEFT": [72, 200], "MARGIN-RIGHT": [540, 200],
+    "MARGIN-TOP": [300, 36], "MARGIN-BOTTOM": [300, 756]
+  },
+  "objects": [
+    { "id": "TEXT-IN-1", "kind": "text", "bounds": [120, 100, 250, 130], "expectedSheets": [1] },
+    { "id": "INK-IN-2", "kind": "ink", "bounds": [130, 850, 280, 900], "expectedSheets": [2] },
+    { "id": "PHOTO-IN-3", "kind": "photograph", "bounds": [150, 1500, 330, 1600], "expectedSheets": [3] },
+    { "id": "DIAGRAM-LEFT", "kind": "diagram", "bounds": [40, 300, 110, 380], "crosses": "left", "expectedSheets": [1] },
+    { "id": "TEXT-RIGHT", "kind": "text", "bounds": [550, 420, 630, 455], "crosses": "right", "expectedSheets": [1] },
+    { "id": "INK-TOP", "kind": "ink", "bounds": [180, -15, 330, 25], "crosses": "top", "expectedSheets": [1] },
+    { "id": "PHOTO-BOTTOM", "kind": "photograph", "bounds": [180, 675, 390, 755], "crosses": "bottom", "expectedSheets": [1, 2] },
+    { "id": "DIAGRAM-OVERLAP-2", "kind": "diagram", "bounds": [100, 1380, 430, 1420], "crosses": "advance", "expectedSheets": [2, 3] }
+  ]
+}

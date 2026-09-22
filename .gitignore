@@ -6,3 +6,12 @@
 
 # PowerShell test output
 TestResults/
+
+# Disposable OneNote integration artifacts may contain notebook metadata/photos
+tests/integration/output/
+tests/integration/*.pdf
+tests/integration/*verification*.json
+
+# Python cache
+__pycache__/
+*.py[cod]
